@@ -49,6 +49,11 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# (r), (s) and (t) are pinned a second time for a host with no lsof at all, where
+# bin/fm-lock-lib.sh answers the holder and cwd-scan questions from the
+# platform's own facilities: the same verdicts, plus the boundary that a
+# non-Windows platform never consults them and keeps the old fallback.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -64,6 +69,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_UNAME_FOR_TEST=$(command -v uname)
+export REAL_UNAME_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -493,6 +500,104 @@ SH
   chmod +x "$case_dir/fakebin/lsof"
 }
 
+# --- Windows (no lsof) probe stubs -------------------------------------------
+# Where no lsof exists, bin/fm-lock-lib.sh answers the same two questions from
+# the platform's own facilities, so these stubs stand in for exactly what it
+# runs there, the way the lsof stubs above stand in for lsof. The platform
+# verdict is forced through `uname -s` rather than read off the host, so every
+# case below exercises the same branch on macOS, Linux and Windows.
+
+# uname stub: answer `uname -s` with <sysname> and defer every other form to the
+# real uname, which fm_lock_path_mtime still consults for its stat flags.
+add_uname_shim() {  # <case-dir> <sysname>
+  local case_dir=$1 sysname=$2
+  cat > "$case_dir/fakebin/uname" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 1 ] && [ "\${1:-}" = -s ]; then
+  printf '%s\n' '$sysname'
+  exit 0
+fi
+exec "\${REAL_UNAME_FOR_TEST:?}" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/uname"
+}
+
+# The Windows file-holder probe is one cygpath call plus one powershell.exe call
+# whose entire output is the verdict: `free`, `holder`, or anything else, which
+# is the probe's cannot-tell path.
+add_windows_file_probe() {  # <case-dir> <verdict>
+  local case_dir=$1 verdict=$2
+  cat > "$case_dir/fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+# `cygpath -w -- <path>`: the result is only ever handed to powershell.exe, which
+# is stubbed alongside this, so any stable Windows-shaped string will do.
+printf 'C:\\fixture%s\n' "${*: -1}"
+SH
+  cat > "$case_dir/fakebin/powershell.exe" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$verdict'
+SH
+  chmod +x "$case_dir/fakebin/cygpath" "$case_dir/fakebin/powershell.exe"
+}
+
+# An empty stand-in procfs for the native cwd scan. Echoes its root.
+new_proc_fixture() {  # <case-dir>
+  local root=$1/proc
+  mkdir -p "$root"
+  printf '%s\n' "$root"
+}
+
+# A procfs entry the scan cannot resolve: the process is still listed, but its
+# cwd link leads nowhere. That is the scan's error path, distinct from a process
+# that simply exited between the listing and the read.
+add_unresolvable_proc_entry() {  # <proc-root> <pid>
+  mkdir -p "$1/$2"
+  ln -sfn "$1/no-such-cwd" "$1/$2/cwd"
+}
+
+# A leaked worktree process that publishes - and withdraws - its own entry in
+# the stand-in procfs, so the scan sees the entry appear and disappear exactly
+# when the process does. A static fixture would instead keep reporting a pid
+# teardown has already reaped, and teardown would refuse.
+# Sets FIXTURE_LEAKED_PID rather than echoing it: read through a command
+# substitution, the background process would inherit (and hold open) the
+# substitution's own pipe.
+FIXTURE_LEAKED_PID=
+start_fixture_leaked_process() {  # <case-dir> <proc-root> <cwd-dir>
+  local case_dir=$1 proc_root=$2 dir=$3 script ready waited=0
+  script="$case_dir/leaked-process.sh"
+  ready="$case_dir/leaked-process-ready"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+set -u
+proc_root=$1 dir=$2 ready=$3
+entry="$proc_root/$$"
+mkdir -p "$entry"
+# The real shape of a procfs stat line: the 20th field after the command name is
+# the start time task_process_identity reads.
+printf '%s (leaked) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0 0\n' "$$" "$$" > "$entry/stat"
+ln -s "$dir" "$entry/cwd"
+child=
+cleanup() {
+  [ -z "$child" ] || kill "$child" 2>/dev/null
+  rm -rf "${entry:?}"
+  exit 0
+}
+trap cleanup TERM INT HUP EXIT
+cd "$dir" || exit 1
+: > "$ready"
+sleep 300 &
+child=$!
+wait "$child"
+SH
+  chmod +x "$script"
+  "$script" "$proc_root" "$dir" "$ready" >/dev/null 2>&1 &
+  FIXTURE_LEAKED_PID=$!
+  disown
+  while [ ! -e "$ready" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || fail "fixture leaked process never started"
+}
+
 add_stat_error() {
   local case_dir=$1
   cat > "$case_dir/fakebin/stat" <<'SH'
@@ -547,19 +652,6 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
-}
-
-# Build the teardown test's executable search path without lsof, regardless of
-# whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
-make_path_without_lsof() {  # <case-dir>
-  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
-  mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
-    resolved=$(command -v "$cmd" 2>/dev/null) || continue
-    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
-  done
-  printf '%s\n' "$path_dir"
 }
 
 test_local_only_fork_remote_allows() {
@@ -2264,9 +2356,13 @@ test_lsof_absent_reaps_tmux_process_group() {
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
-  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
   PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
     && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes lsof"
+  # This fallback is what remains when there is no scan of any kind, so pin the
+  # platform: a Windows host answers the same question natively and never
+  # reaches it. That branch has its own case below.
+  add_uname_shim "$case_dir" Linux
 
   perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
   pid=$!
@@ -2321,6 +2417,186 @@ EOF
   assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
   assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
   pass "an erroring lsof scan refuses teardown and preserves the task"
+}
+
+test_windows_cwd_scan_reaps_leaked_worktree_process() {
+  local case_dir rc pid proc_root path_without_lsof
+  case_dir=$(make_case windows-cwd-scan-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
+  proc_root=$(new_proc_fixture "$case_dir")
+  start_fixture_leaked_process "$case_dir" "$proc_root" "$case_dir/wt"
+  pid=$FIXTURE_LEAKED_PID
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "windows-cwd-scan-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "windows-cwd-scan-reap: leaked worktree process survived the native cwd scan"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "windows-cwd-scan-reap: teardown did not report reaping the leaked process"
+  assert_not_contains "$(cat "$case_dir/stderr")" "lsof is unavailable" \
+    "windows-cwd-scan-reap: teardown still degraded to the missing-lsof fallback"
+  pass "with no lsof, the native cwd scan finds and reaps a leaked worktree process"
+}
+
+test_windows_cwd_scan_error_refuses_before_removal() {
+  local case_dir rc proc_root path_without_lsof
+  case_dir=$(make_case windows-cwd-scan-error)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
+  proc_root=$(new_proc_fixture "$case_dir")
+  add_unresolvable_proc_entry "$proc_root" 424242
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "windows-cwd-scan-error: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (the MSYS /proc cwd scan failed)" \
+    "$case_dir/stderr" "windows-cwd-scan-error: teardown did not name the failing scan"
+  assert_present "$case_dir/wt" "windows-cwd-scan-error: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "windows-cwd-scan-error: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "windows-cwd-scan-error: teardown returned the worktree"
+  pass "a native cwd scan that cannot resolve a listed process refuses teardown and preserves the task"
+}
+
+test_non_windows_uname_never_uses_the_native_cwd_scan() {
+  local case_dir rc pid proc_root path_without_lsof
+  case_dir=$(make_case non-windows-no-native-scan)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  # A platform that is not Windows keeps the missing-lsof behavior exactly:
+  # the backend process-group fallback, never the native scan.
+  add_uname_shim "$case_dir" Linux
+  proc_root=$(new_proc_fixture "$case_dir")
+  start_fixture_leaked_process "$case_dir" "$proc_root" "$case_dir/wt"
+  pid=$FIXTURE_LEAKED_PID
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "non-windows-no-native-scan: teardown should succeed"
+  assert_grep "lsof is unavailable" "$case_dir/stderr" \
+    "non-windows-no-native-scan: teardown did not fall back the way a missing lsof always has"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "non-windows-no-native-scan: the native cwd scan ran on a non-Windows uname"
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  pass "a non-Windows uname never reaches the native cwd scan, missing lsof or not"
+}
+
+test_windows_file_probe_clears_stale_index_lock() {
+  local case_dir rc lock proc_root path_without_lsof
+  case_dir=$(make_case windows-stale-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
+  add_windows_file_probe "$case_dir" free
+  proc_root=$(new_proc_fixture "$case_dir")
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "windows-stale-index-lock: teardown should succeed after clearing the provably stale lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "windows-stale-index-lock: teardown did not report clearing the stale lock"
+  assert_absent "$lock" "windows-stale-index-lock: stale lock file should have been removed"
+  pass "with no lsof, an unheld old index.lock is provably stale and teardown succeeds"
+}
+
+test_windows_file_probe_live_holder_keeps_index_lock() {
+  local case_dir rc lock proc_root path_without_lsof
+  case_dir=$(make_case windows-live-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
+  add_windows_file_probe "$case_dir" holder
+  proc_root=$(new_proc_fixture "$case_dir")
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  # An old mtime must never outvote a live holder.
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "windows-live-index-lock: teardown should refuse when the lock has a live holder"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "windows-live-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "windows-live-index-lock: teardown removed a lock with a live holder"
+  [ -e "$lock" ] || fail "windows-live-index-lock: live-held lock file was removed"
+  pass "with no lsof, a held index.lock is never removed and teardown refuses"
+}
+
+test_windows_file_probe_error_never_clears_index_lock() {
+  local case_dir rc lock proc_root path_without_lsof
+  case_dir=$(make_case windows-probe-error-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  path_without_lsof=$(fm_test_path_without_lsof "$case_dir")
+  add_uname_shim "$case_dir" MINGW64_NT-10.0-26200
+  add_windows_file_probe "$case_dir" "error: simulated probe failure"
+  proc_root=$(new_proc_fixture "$case_dir")
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "windows-probe-error-index-lock: teardown should refuse when the holder probe errors"
+  assert_grep "holder check failed" "$case_dir/stderr" \
+    "windows-probe-error-index-lock: teardown did not report the probe failure"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "windows-probe-error-index-lock: teardown removed a lock after the probe failed"
+  [ -e "$lock" ] || fail "windows-probe-error-index-lock: lock file was removed after the probe failed"
+  pass "with no lsof, a holder probe that cannot answer leaves the index.lock in place and refuses"
 }
 
 test_reused_pid_identity_is_not_force_killed() {
@@ -2643,6 +2919,12 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
+test_windows_cwd_scan_reaps_leaked_worktree_process
+test_windows_cwd_scan_error_refuses_before_removal
+test_non_windows_uname_never_uses_the_native_cwd_scan
+test_windows_file_probe_clears_stale_index_lock
+test_windows_file_probe_live_holder_keeps_index_lock
+test_windows_file_probe_error_never_clears_index_lock
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass

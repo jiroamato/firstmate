@@ -78,12 +78,12 @@
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
 #      companion directory and FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) as the age
-#      threshold. That shared proof owns the exact lsof-holder, mtime-age, and fail-safe
-#      rules.
+#      threshold. That shared proof owns the exact holder-probe (per platform),
+#      mtime-age, and fail-safe rules.
 #   4. If retries exhaust and the lock is not provably stale, teardown fails as loudly
 #      as a normal return failure and notes that the lock persisted across the retry
-#      window. A missing `lsof`, or a lock that fails any stale check, is treated as
-#      NOT provably stale (fail safe): the lock is left untouched.
+#      window. A lock that fails any stale check, including one whose holder cannot be
+#      probed at all, is NOT provably stale (fail safe): the lock is left untouched.
 # The same proof is used when non-force safety inspection cannot run because the lock
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
@@ -118,11 +118,12 @@
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     walking the worktree's file tree), or via the native equivalent
+#     bin/fm-lock-lib.sh owns for platforms that ship no lsof, and sends TERM,
+#     then KILL after a short grace period to any survivor whose process
+#     identity still matches. Both roots are unique per task and never shared,
+#     so this can never reach another task's or the primary's processes.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1288,10 +1289,18 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
 # documents as slow). Never $$ (this script's own pid). Empty output when
 # nothing matches; failure means the scan could not establish a safe result.
+# Where there is no lsof to run, bin/fm-lock-lib.sh answers the same question
+# from the platform's own process table; task_cwd_scan_name names whichever
+# probe ran so a refusal below points at the right thing.
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
+  if ! command -v lsof >/dev/null 2>&1; then
+    fm_lock_windows_cwd_scan_supported || return 1
+    fm_lock_windows_pids_with_cwd_under "$dir"
+    return
+  fi
   out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
@@ -1339,6 +1348,26 @@ task_process_identity() {  # <pid>
   printf 'lstart=%s\n' "$value"
 }
 
+# The process group of <pid>, or nothing when it cannot be read. Procfs first
+# where it publishes the group as its own file (MSYS does; Linux does not, and
+# falls through), because a `ps` without -o support cannot answer this at all -
+# which is exactly the case on the platforms that have no lsof either, and would
+# otherwise leave the fallback below with nothing to signal.
+task_process_pgid() {  # <pid>
+  local pid=$1 proc_root value=''
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/pgid" ]; then
+    # read returns nonzero on EOF-without-newline while still filling the
+    # variable, so validate the content rather than the read status.
+    read -r value < "$proc_root/$pid/pgid" 2>/dev/null || true
+  else
+    value=$(ps -o pgid= -p "$pid" 2>/dev/null) || value=''
+  fi
+  value=$(printf '%s' "$value" | tr -d '[:space:]')
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 task_process_identity_matches() {  # <pid> <identity>
   local current
   current=$(task_process_identity "$1") || return 1
@@ -1347,6 +1376,21 @@ task_process_identity_matches() {  # <pid> <identity>
 
 task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
+}
+
+# The probe pids_with_cwd_under actually runs, for operator-facing messages.
+task_cwd_scan_name() {
+  if command -v lsof >/dev/null 2>&1; then
+    printf 'lsof'
+  else
+    printf 'the MSYS /proc cwd scan'
+  fi
+}
+
+# ONE owner of the "the cwd scan could not answer, so nothing may be removed"
+# refusal, named after whichever probe ran.
+refuse_unresolved_task_pids() {
+  echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID ($(task_cwd_scan_name) failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
 }
 
 task_pids_under_roots() {  # <dir>...
@@ -1381,28 +1425,25 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
-  pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
-  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  pgid=$(task_process_pgid "$leader") || pgid=""
   case "$pgid" in ''|*[!0-9]*|0|1)
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
   esac
-  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
-  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  own_pgid=$(task_process_pgid "$$") || own_pgid=""
   if [ "$pgid" = "$own_pgid" ]; then
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
   task_process_identity_matches "$leader" "$leader_start" || return 0
-  current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
-  current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
+  current_pgid=$(task_process_pgid "$leader") || current_pgid=""
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
   if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
+     && [ "$(task_process_pgid "$leader" || true)" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
     kill -KILL -- "-$pgid" 2>/dev/null || true
@@ -1413,19 +1454,20 @@ reap_task_backend_process_group() {  # <label>
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
-# the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# the recheck. With neither lsof nor a native cwd scan there is nothing to scan
+# with, so the backend process-group fallback runs instead; a scan that runs and
+# errors refuses before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  if ! command -v lsof >/dev/null 2>&1; then
+  if ! command -v lsof >/dev/null 2>&1 && ! fm_lock_windows_cwd_scan_supported; then
     reap_task_backend_process_group "$label"
     return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      refuse_unresolved_task_pids
       return 1
     fi
     pids=$TASK_PIDS
@@ -1436,7 +1478,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
       [ -n "$pid" ] || continue
       if ! identity=$(task_process_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
-          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+          refuse_unresolved_task_pids
           return 1
         fi
         if task_pid_list_contains "$TASK_PIDS" "$pid"; then
@@ -1455,7 +1497,7 @@ EOF
       continue
     fi
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      refuse_unresolved_task_pids
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1470,7 +1512,7 @@ EOF
     done
     sleep 1
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      refuse_unresolved_task_pids
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1488,7 +1530,7 @@ EOF
     if [ "${#remaining_pids[@]}" -gt 0 ]; then
       echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
       if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+        refuse_unresolved_task_pids
         return 1
       fi
       current_pids=$TASK_PIDS
@@ -1504,7 +1546,7 @@ EOF
     pass=$((pass + 1))
   done
   if ! task_pids_under_roots "$@"; then
-    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    refuse_unresolved_task_pids
     return 1
   fi
   [ -z "$TASK_PIDS" ] && return 0
