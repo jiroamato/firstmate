@@ -52,8 +52,11 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
+  # Builtin parameter expansion and [[ =~ ]] (the same ERE class grep -E
+  # used) instead of basename/grep subprocesses: this runs once per ancestry
+  # hop, and on Windows MSYS every fork costs ~100ms.
+  base=${comm##*/}
+  if [[ $base =~ $FM_HARNESS_RE ]]; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
@@ -65,13 +68,167 @@ fm_harness_process_matches() {  # <comm> <args>
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
+      if [[ $args =~ $FM_HARNESS_RE ]]; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
       ;;
   esac
   return 1
+}
+
+# --- Windows (Git Bash/MSYS) native-process support --------------------------
+# On Windows the harness is a NATIVE process (claude.exe under a terminal),
+# and MSYS tooling cannot reach it: MSYS ps lists only MSYS processes (a
+# native parent reads as ppid 1), supports no -o fields, and ps -W reports no
+# usable parent pid for native rows. ParentProcessId is only exposed through
+# WMI/CIM, and the only shipped CLI for that is PowerShell (wmic is gone from
+# Windows 11; tasklist has no parent field). So on Windows the walk translates
+# the MSYS self pid to its native pid via /proc/<pid>/winpid and reads the
+# parent chain from ONE batched PowerShell CIM snapshot; the harness-matching
+# policy stays in this file, PowerShell only supplies raw (pid, name,
+# command-line) rows. Every pid recorded, printed, or checked on Windows is a
+# NATIVE pid: stable for the harness's lifetime and answerable by tasklist.
+# Liveness stays off PowerShell on its hot path (the Stop hook runs it every
+# turn end): tasklist answers existence+name in tens of milliseconds, and only
+# a bare-interpreter name (node/python) pays one scoped CIM query for the
+# command line.
+
+fm_harness_platform_is_windows() {
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_harness_windows_self_pid() {
+  local wp
+  wp=$(cat "/proc/$$/winpid" 2>/dev/null) || return 1
+  case "$wp" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$wp"
+}
+
+# Print up to 16 native ancestors of native pid $1, innermost first, one
+# tab-separated "<pid>\t<name>\t<command-line>" row per hop, from one batched
+# process-table snapshot. Tabs, CRs and LFs inside a command line are
+# flattened to spaces so the row shape stays parseable.
+fm_harness_windows_ancestry_snapshot() {  # <native-pid>
+  local start=$1
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  # Per-pid filtered queries inside ONE PowerShell process, with the same
+  # climb-then-extend boundary applied as an EMISSION bound so the walk stops
+  # paying WMI queries once the contiguous harness run has provably ended.
+  # This is only an optimization: bash re-applies the real matching policy to
+  # every emitted row, and an under-stopped walk merely emits extra rows.
+  # Measured ~3s for a full-table snapshot vs a few hundred ms this way.
+  MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command '
+    $re="'"$FM_HARNESS_RE"'"
+    $p=[int]'"$start"'
+    $matched=$false
+    for($i=0; $i -lt 16 -and $p -gt 0; $i++){
+      $x=Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+      if(-not $x){break}
+      $cl="$($x.CommandLine)" -replace "[`r`n`t]"," "
+      Write-Output "$($x.ProcessId)`t$($x.Name)`t$cl"
+      $n=("$($x.Name)" -replace "\.exe$","")
+      if($n -cmatch $re){
+        if($n -notmatch "claude"){break}
+        $matched=$true
+      } elseif($matched){break}
+      $p=[int]$x.ParentProcessId
+    }' 2>/dev/null | tr -d '\r'
+}
+
+# Windows body of fm_harness_ancestry_pids: identical climb-then-extend
+# policy, fed by a two-stage native-pid row stream.
+#
+# Stage 1 climbs the MSYS ancestry via /proc, because a fork/exec'd MSYS
+# descendant's NATIVE parent is a transient fork stub that has already
+# exited - the Windows parent chain is broken at every MSYS-spawned hop, so
+# CIM alone dead-ends one hop up (verified live: a nested bash's
+# ParentProcessId named a nonexistent process). MSYS's own /proc ppid chain
+# tracks those hops correctly. Each hop is emitted under its NATIVE pid
+# (/proc/<pid>/winpid) so everything downstream stays tasklist/CIM-checkable.
+#
+# Stage 2 continues above the MSYS root (ppid 1) through the CIM snapshot,
+# which is valid there because the root was started by a native
+# CreateProcess - that is where claude.exe and the terminal chain live.
+fm_harness_windows_ancestry_pids() {
+  # MSYS fork emulation makes every subprocess cost ~100ms on Windows, so
+  # this function reads /proc with bash builtins (read/mapfile, no cat/tr)
+  # and parses rows in-shell (no awk); the one PowerShell child is the only
+  # unavoidable spawn on the happy path.
+  local pid=$$ wp ppid name args rows='' root_wp='' snapshot tab
+  local -a argv
+  tab=$(printf '\t')
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    [ -d "/proc/$pid" ] || break
+    # read returns nonzero on EOF-without-newline while still filling the
+    # variable, so validate content instead of the read status.
+    wp=''
+    read -r wp < "/proc/$pid/winpid" 2>/dev/null || true
+    case "$wp" in ''|*[!0-9]*) break ;; esac
+    name=''
+    read -r name < "/proc/$pid/exename" 2>/dev/null || true
+    argv=()
+    mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || true
+    args="${argv[*]-}"
+    args=${args//"$tab"/ }
+    rows="$rows$wp$tab$name$tab$args
+"
+    root_wp=$wp
+    ppid=''
+    read -r ppid < "/proc/$pid/ppid" 2>/dev/null || true
+    case "$ppid" in ''|*[!0-9]*) break ;; esac
+    [ "$ppid" -gt 1 ] || break
+    pid=$ppid
+  done
+  if [ -z "$root_wp" ]; then
+    # No MSYS /proc chain at all: fall back to a pure native walk from self.
+    root_wp=$(fm_harness_windows_self_pid) || return 1
+  fi
+  # The snapshot's first row repeats the MSYS root already emitted above.
+  # That duplicate is deliberately left in place: a duplicate row changes
+  # neither lock-pid membership nor the outermost-of-run selection, and
+  # dropping it would cost another subprocess.
+  snapshot=$(fm_harness_windows_ancestry_snapshot "$root_wp")
+  rows="$rows$snapshot"
+  [ -n "$rows" ] || return 1
+  local extending=0 printed=0
+  while IFS=$tab read -r pid name args; do
+    pid=${pid%$'\r'}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if fm_harness_process_matches "$name" "$args"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done <<EOF
+$rows
+EOF
+  [ "$printed" -eq 1 ]
+}
+
+# Windows body of fm_harness_pid_alive: kill -0 cannot probe a native pid
+# from MSYS, so existence and name come from tasklist (cheap), and only an
+# interpreter-named survivor pays one scoped CIM query for its command line.
+fm_harness_windows_pid_alive() {
+  local pid=$1 row name args
+  row=$(MSYS_NO_PATHCONV=1 tasklist.exe /FI "PID eq $pid" /FO CSV /NH 2>/dev/null | tr -d '\r') || return 1
+  case "$row" in '"'*) ;; *) return 1 ;; esac  # non-match prints an INFO line, never CSV
+  name=${row#\"}
+  name=${name%%\"*}
+  fm_harness_process_matches "$name" "" && return 0
+  case "$name" in
+    *node*|*python*)
+      args=$(MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=$pid\").CommandLine" 2>/dev/null | tr -d '\r')
+      fm_harness_process_matches "$name" "$args"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -94,6 +251,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  if fm_harness_platform_is_windows; then
+    fm_harness_windows_ancestry_pids
+    return
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -132,6 +293,10 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  if fm_harness_platform_is_windows; then
+    fm_harness_windows_pid_alive "$pid"
+    return
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
