@@ -67,8 +67,8 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
-REAL_LSOF_FOR_TEST=$(command -v lsof)
-export REAL_LSOF_FOR_TEST
+REAL_CAT_FOR_TEST=$(command -v cat)
+export REAL_CAT_FOR_TEST
 REAL_UNAME_FOR_TEST=$(command -v uname)
 export REAL_UNAME_FOR_TEST
 
@@ -2647,7 +2647,7 @@ SH
 }
 
 test_exec_changed_process_is_still_reaped() {
-  local case_dir rc pid marker done_flag survived=0
+  local case_dir rc pid marker done_flag wt_phys survived=0
   case_dir=$(make_case exec-changed-process)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -2664,6 +2664,22 @@ test_exec_changed_process_is_still_reaped() {
   pid=$!
   disown
   sleep 0.2
+  # The exec fires the moment teardown reads this pid's birth identity, so both
+  # sources of that identity are hooked: the procfs stat file (which teardown
+  # reads with cat, and which is where a host with a /proc answers) and
+  # `ps -o lstart=` (where a host without one answers). Whichever the platform
+  # uses, the marker write is the same and idempotent. Neither is faked: the
+  # value teardown compares across the exec stays the real one, which is the
+  # whole point of the case.
+  cat > "$case_dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */"${FM_FAKE_EXEC_PID:-no-such-pid}"/stat)
+    [ -e "$FM_FAKE_EXEC_MARKER" ] || : > "$FM_FAKE_EXEC_MARKER"
+    ;;
+esac
+exec "$REAL_CAT_FOR_TEST" "$@"
+SH
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
@@ -2675,26 +2691,34 @@ if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
 fi
 exec "$REAL_PS_FOR_TEST" "$@"
 SH
-  cat > "$case_dir/fakebin/lsof" <<'SH'
+  # A stand-in for `lsof -a -d cwd -Fpn`, not a wrapper around the host's own:
+  # this case is about the identity check surviving an exec, and a host that
+  # ships no lsof at all has nothing to wrap. Same shape the reused-pid case
+  # above emits. The second scan blocks until the exec has completed, and the
+  # pid stops being reported once it is gone, as a real scan would.
+  wt_phys=$(cd "$case_dir/wt" && pwd -P)
+  cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
 count=0
-[ ! -f "$FM_FAKE_LSOF_COUNT" ] || count=$(cat "$FM_FAKE_LSOF_COUNT")
-count=$((count + 1))
-printf '%s\n' "$count" > "$FM_FAKE_LSOF_COUNT"
-if [ "$count" -eq 2 ]; then
+[ ! -f "\$FM_FAKE_LSOF_COUNT" ] || count=\$(cat "\$FM_FAKE_LSOF_COUNT")
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$FM_FAKE_LSOF_COUNT"
+if [ "\$count" -eq 2 ]; then
   i=0
-  while [ "$i" -lt 100 ]; do
-    [ ! -e "$FM_FAKE_EXEC_DONE" ] || break
+  while [ "\$i" -lt 100 ]; do
+    [ ! -e "\$FM_FAKE_EXEC_DONE" ] || break
     sleep 0.01
-    i=$((i + 1))
+    i=\$((i + 1))
   done
 fi
-exec "$REAL_LSOF_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
+if kill -0 "\${FM_FAKE_EXEC_PID:?}" 2>/dev/null; then
+  printf 'p%s\nfcwd\nn%s\n' "\$FM_FAKE_EXEC_PID" '$wt_phys'
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/cat" "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
   FM_FAKE_EXEC_PID="$pid" FM_FAKE_EXEC_MARKER="$marker" \
   FM_FAKE_EXEC_DONE="$done_flag" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
