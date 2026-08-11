@@ -245,6 +245,14 @@ fm_pr_file_inode() {
   fi
 }
 
+fm_pr_file_owner() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %u "$1" 2>/dev/null
+  else
+    stat -c %u "$1" 2>/dev/null
+  fi
+}
+
 fm_pr_file_identity() {
   local device inode
   device=$(fm_pr_file_device "$1") || return 1
@@ -264,9 +272,23 @@ fm_pr_sha256() {
 }
 
 fm_pr_private_file_valid() {
-  local path=$1 mode=$2 device=$3
+  local path=$1 mode=$2 device=$3 expected_uid
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+      # Windows Git Bash: these files live under the user's own state dir, which
+      # NTFS ACLs already make user-private, and the emulated POSIX mode on a
+      # noacl mount cannot be forced (chmod 0600 reads back 644). Owner match is
+      # the effective equivalent of the Unix mode requirement there, the same
+      # substitution bin/backends/herdr.sh makes for its 700 lock namespace.
+      expected_uid=$(id -u 2>/dev/null) || return 1
+      [ -n "$expected_uid" ] || return 1
+      [ "$(fm_pr_file_owner "$path")" = "$expected_uid" ] || return 1
+      ;;
+    *)
+      [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+      ;;
+  esac
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
