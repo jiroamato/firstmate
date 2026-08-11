@@ -681,6 +681,16 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+      # Windows Git Bash: /tmp maps to the user's own %TEMP%, which NTFS ACLs
+      # already make user-private, and the emulated POSIX mode on a noacl
+      # mount cannot be forced to 700 (mkdir -m 700 reads back 755). Owner
+      # match is the effective equivalent of the Unix 700 requirement there.
+      [ "$owner" = "$expected_uid" ]
+      return
+      ;;
+  esac
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
@@ -699,6 +709,18 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  # On Windows, herdr injects and reports native drive-letter socket paths
+  # (C:\...\herdr.sock). Convert them to the POSIX spelling before the
+  # absolute-path check so both the injected identity and the session-list
+  # socket_path canonicalize identically. Without cygpath (non-Windows), a
+  # drive-letter path stays unconvertible and is refused below as before.
+  case "$socket" in
+    [A-Za-z]:[\\/]*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      [ -n "$socket" ] || return 1
+      ;;
+  esac
   case "$socket" in
     /*) ;;
     *) return 1 ;;
@@ -2525,9 +2547,57 @@ fm_backend_herdr_target_ready() {  # <target>
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
 fm_backend_herdr_current_path() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  local target=$1 path
+  fm_backend_herdr_target_ready "$target" || return 0
+  path=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  if [ -n "$path" ]; then
+    printf '%s' "$path"
+    return 0
+  fi
+  # Windows herdr reports foreground_cwd as null (no /proc to read the live
+  # foreground process's cwd from), so passive polling can never see the pane
+  # enter its treehouse subshell. Fall back to the same active $PWD marker
+  # probe the zellij adapter uses for the identical gap: atomically run a
+  # marker-wrapped pwd in the pane, settle briefly, then read only the marker
+  # block back. Scoped in practice to fm-spawn.sh's worktree-discovery poll,
+  # before the harness launches, where an extra shell command is harmless.
+  fm_backend_herdr_current_path_probe "$target"
+}
+
+fm_backend_herdr_current_path_probe() {  # <target>
+  local target=$1 out line marker_begin="__FM_HERDR_CWD_BEGIN__" marker_end="__FM_HERDR_CWD_END__" in_block=0 chunk="" last=""
+  # Only probe a pane that is sitting at a shell prompt: injecting while the
+  # shell is still initializing (or while a fixed spawn command is pending)
+  # can replace that pending input on Windows herdr, and injecting into a
+  # running foreground command would type into it. No prompt visible = no
+  # answer this poll; the caller's loop simply polls again.
+  out=$(fm_backend_herdr_capture "$target" 200) || return 0
+  last=$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)
+  case "$last" in
+    *'$'|*'$ '|*'#'|*'# '|*'%'|*'% '|*'❯'|*'❯ '|*'>'|*'> ') ;;
+    *) return 0 ;;
+  esac
+  last=""
+  fm_backend_herdr_send_text_line "$target" "printf '%s\n' '$marker_begin'; pwd; printf '%s\n' '$marker_end'" || return 0
+  sleep 0.3
+  out=$(fm_backend_herdr_capture "$target" 200) || return 0
+  while IFS= read -r line; do
+    if [ "$line" = "$marker_begin" ]; then
+      in_block=1
+      chunk=""
+      continue
+    fi
+    if [ "$line" = "$marker_end" ]; then
+      case "$chunk" in /*) last=$chunk ;; esac
+      in_block=0
+      continue
+    fi
+    [ "$in_block" -eq 1 ] && chunk="$chunk$line"
+  done <<EOF
+$out
+EOF
+  printf '%s' "$last"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

@@ -2168,6 +2168,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Windows herdr silently drops pane input sent before the pane's shell is
+  # ready (a conda-initialized Git Bash takes a couple of seconds to reach its
+  # first prompt), which loses the treehouse command entirely. Wait for a
+  # shell prompt to appear in the pane before sending; give up quietly after
+  # the bounded window and send anyway, preserving the old behavior.
+  if [ "$BACKEND" = herdr ]; then
+    for _ in $(seq 1 30); do
+      _cap=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 5 "$W" 2>/dev/null || true)
+      _last=$(printf '%s\n' "$_cap" | sed '/^[[:space:]]*$/d' | tail -n 1)
+      case "$_last" in
+        *'$'|*'$ '|*'#'|*'# '|*'%'|*'% '|*'❯'|*'❯ '|*'>'|*'> ') break ;;
+      esac
+      sleep 0.5
+    done
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
