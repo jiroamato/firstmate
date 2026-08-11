@@ -187,6 +187,30 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_test_path_without_lsof <dir> echoes a search path that carries the ordinary
+# tools a firstmate script reaches for and no lsof. A stub cannot express "this
+# tool does not exist", so a case driving the no-lsof branch has to run against a
+# path that genuinely lacks lsof, wherever the host installs it.
+#
+# On a host with no lsof to begin with, the inherited path already qualifies and
+# is handed back as-is. That is not just an optimization: the rebuilt path is
+# made of symlinks, and on Windows those are MSYS-emulated links that a NATIVE
+# child - Git for Windows' git.exe spawning sh, say - cannot execute.
+fm_test_path_without_lsof() {
+  local path_dir="$1/path-without-lsof" cmd resolved
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '%s\n' "$PATH"
+    return 0
+  fi
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

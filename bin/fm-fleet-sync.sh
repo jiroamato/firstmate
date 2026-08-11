@@ -157,7 +157,7 @@ packed_refs_lock_path() {
 # signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
 # transient lock self-clears as the owning process exits), then - only if the lock
 # is provably stale per fm-lock-lib.sh (still present, mtime age past the
-# threshold, no lsof holder of the lock or the clone worktree $PROJ) - remove it
+# threshold, no live holder of the lock or of the clone worktree $PROJ) - remove it
 # and retry once more. A live lock, an unprovable one, or any other failure keeps
 # today's behavior. Every wait, retry, and removal prints to stderr, and a
 # successful recovery also prints one "$label: recovered: ..." summary to stdout so
@@ -188,7 +188,7 @@ fetch_with_packed_refs_lock_guard() {
   # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
   # The companion liveness dir is $PROJ (the clone worktree): a live `git -C "$PROJ"`
   # keeps its cwd there even in the narrow window after it closes packed-refs.lock
-  # and before it exits, so lsof on $PROJ still catches a holder the lock-file check
+  # and before it exits, so probing $PROJ still catches a holder the lock-file check
   # alone would miss.
   lock=$(packed_refs_lock_path) || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then

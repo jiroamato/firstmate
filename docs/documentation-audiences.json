@@ -357,6 +357,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/windows-process-probes.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
     },

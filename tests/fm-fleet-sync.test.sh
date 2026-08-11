@@ -21,6 +21,9 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+# The same four verdicts are pinned again for a host with no lsof at all, where
+# that proof reads the platform's own facilities instead, including the boundary
+# that a non-Windows platform never consults them.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -29,6 +32,8 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-fleet-sync-tests)
+REAL_UNAME_FOR_TEST=$(command -v uname)
+export REAL_UNAME_FOR_TEST
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -158,6 +163,54 @@ SH
   chmod +x "$1/lsof"
 }
 
+# --- Windows (no lsof) probe shims ------------------------------------------
+# Where no lsof exists, bin/fm-lock-lib.sh proves the same two things from the
+# platform's own facilities, so these shims stand in for exactly what it runs
+# there. The platform verdict is forced through `uname -s` rather than read off
+# the host, so these cases run identically on macOS, Linux and Windows.
+
+# uname stub: answer `uname -s` with <sysname>, and defer every other form to the
+# real uname that fm_lock_path_mtime still consults for its stat flags.
+windows_uname() {  # <fakebin> <sysname>
+  cat > "$1/uname" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 1 ] && [ "\${1:-}" = -s ]; then
+  printf '%s\n' '$2'
+  exit 0
+fi
+exec "\${REAL_UNAME_FOR_TEST:?}" "\$@"
+SH
+  chmod +x "$1/uname"
+}
+
+# The Windows file-holder probe is one cygpath call plus one powershell.exe call
+# whose entire output is the verdict: `free`, `holder`, or anything else, which
+# is the probe's cannot-tell path.
+windows_file_probe() {  # <fakebin> <verdict>
+  cat > "$1/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf 'C:\\fixture%s\n' "${*: -1}"
+SH
+  cat > "$1/powershell.exe" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$2'
+SH
+  chmod +x "$1/cygpath" "$1/powershell.exe"
+}
+
+# A stand-in procfs for the native cwd scan, optionally listing one process
+# rooted in <cwd-dir>. Echoes the fixture root.
+windows_proc_fixture() {  # <home> <name> [<cwd-dir>]
+  local root="$1/proc-$2"
+  rm -rf "$root"
+  mkdir -p "$root"
+  if [ -n "${3:-}" ]; then
+    mkdir -p "$root/4242"
+    ln -sfn "$3" "$root/4242/cwd"
+  fi
+  printf '%s\n' "$root"
+}
+
 # git shim: fail the FIRST `fetch` with the packed-refs.lock signature and drop
 # the lock (simulating the dying ref-rewrite finishing), then delegate every
 # later call - including the retried fetch - to the real git so the sync completes.
@@ -188,11 +241,14 @@ SH
 # with the fakebin on PATH and stdout/stderr captured separately. Per-test knobs
 # (FM_FLEET_SYNC_PACKED_REFS_LOCK_*, GIT_FETCH_COUNTER) are read from the caller's
 # exported environment.
+# FLEET_TEST_PATH replaces the inherited search path for cases that need a tool
+# to be genuinely absent rather than stubbed (see fm_test_path_without_lsof).
 run_sync_guarded() {
   local home=$1 fakebin=$2 outf=$3 errf=$4 realgit
   shift 4
   realgit=$(command -v git)
-  PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$realgit" \
+  PATH="$fakebin:${FLEET_TEST_PATH:-$PATH}" REAL_GIT_FOR_TEST="$realgit" \
+  REAL_UNAME_FOR_TEST="$REAL_UNAME_FOR_TEST" \
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-fleet-sync.sh" "$@" >"$outf" 2>"$errf"
 }
@@ -558,6 +614,155 @@ test_live_git_cwd_in_clone_dir_blocks_removal() {
   pass "a live process holding the clone worktree dir blocks lock removal (clone-dir liveness)"
 }
 
+test_windows_stale_packed_refs_lock_recovers() {
+  local home fakebin clone out err proc_root
+  home=$(new_home)
+  fakebin="$home/fb-winstale"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" winlockstale)
+  plant_packed_refs_lock "$clone"
+  windows_uname "$fakebin" MINGW64_NT-10.0-26200
+  windows_file_probe "$fakebin" free      # nothing holds the lock file open
+  proc_root=$(windows_proc_fixture "$home" winstale)   # and nothing is rooted in the clone
+  out="$home/out-winstale"; err="$home/err-winstale"
+
+  set +e
+  FLEET_TEST_PATH=$(fm_test_path_without_lsof "$home") \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" winlockstale
+  set -e
+
+  assert_grep "removed provably-stale packed-refs lock" "$err" \
+    "windows stale lock: guard did not force-remove the provably-stale lock"
+  assert_contains "$(cat "$out")" "winlockstale: synced" \
+    "windows stale lock: clone did not sync after recovery"
+  assert_absent "$clone/.git/packed-refs.lock" "windows stale lock: lock should be gone after removal"
+  pass "with no lsof, a provably-stale packed-refs.lock is cleared and the clone syncs"
+}
+
+test_windows_live_packed_refs_lock_is_never_removed() {
+  local home fakebin clone out err before proc_root
+  home=$(new_home)
+  fakebin="$home/fb-winlive"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" winlocklive)
+  plant_packed_refs_lock "$clone"
+  windows_uname "$fakebin" MINGW64_NT-10.0-26200
+  windows_file_probe "$fakebin" holder    # a live process still has the lock open
+  proc_root=$(windows_proc_fixture "$home" winlive)
+  before=$(head_sha "$clone")
+  out="$home/out-winlive"; err="$home/err-winlive"
+
+  set +e
+  FLEET_TEST_PATH=$(fm_test_path_without_lsof "$home") \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" winlocklive
+  set -e
+
+  assert_grep "is not provably stale" "$err" "windows live lock: guard did not explain the refusal"
+  assert_no_grep "removed provably-stale packed-refs lock" "$err" \
+    "windows live lock: guard force-removed a live lock"
+  assert_present "$clone/.git/packed-refs.lock" "windows live lock: lock must never be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "windows live lock: clone was advanced despite the refusal"
+  pass "with no lsof, a held packed-refs.lock is never removed"
+}
+
+test_windows_probe_error_never_removes_packed_refs_lock() {
+  local home fakebin clone out err before proc_root
+  home=$(new_home)
+  fakebin="$home/fb-winerr"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" winlockerr)
+  plant_packed_refs_lock "$clone"
+  windows_uname "$fakebin" MINGW64_NT-10.0-26200
+  windows_file_probe "$fakebin" "error: simulated probe failure"
+  proc_root=$(windows_proc_fixture "$home" winerr)
+  before=$(head_sha "$clone")
+  out="$home/out-winerr"; err="$home/err-winerr"
+
+  set +e
+  FLEET_TEST_PATH=$(fm_test_path_without_lsof "$home") \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" winlockerr
+  set -e
+
+  assert_grep "holder check failed" "$err" "windows probe error: the failure was not reported"
+  assert_no_grep "removed provably-stale packed-refs lock" "$err" \
+    "windows probe error: guard removed a lock it could not prove abandoned"
+  assert_present "$clone/.git/packed-refs.lock" "windows probe error: lock must not be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "windows probe error: clone was advanced despite the refusal"
+  pass "with no lsof, a holder probe that cannot answer never removes a packed-refs.lock"
+}
+
+test_windows_live_process_in_clone_dir_blocks_removal() {
+  local home fakebin clone out err before proc_root
+  home=$(new_home)
+  fakebin="$home/fb-wincwd"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" winlockcwd)
+  plant_packed_refs_lock "$clone"
+  windows_uname "$fakebin" MINGW64_NT-10.0-26200
+  # Nobody holds the lock file, but a live process is rooted in the clone
+  # worktree - the narrow race where git closed the lock but has not yet exited.
+  windows_file_probe "$fakebin" free
+  proc_root=$(windows_proc_fixture "$home" wincwd "$clone")
+  before=$(head_sha "$clone")
+  out="$home/out-wincwd"; err="$home/err-wincwd"
+
+  set +e
+  FLEET_TEST_PATH=$(fm_test_path_without_lsof "$home") \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" winlockcwd
+  set -e
+
+  assert_grep "is not provably stale" "$err" "windows clone-cwd holder: guard did not refuse"
+  assert_no_grep "removed provably-stale packed-refs lock" "$err" \
+    "windows clone-cwd holder: guard removed a lock while a live process held the clone dir"
+  assert_present "$clone/.git/packed-refs.lock" "windows clone-cwd holder: lock must not be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "windows clone-cwd holder: clone was advanced despite the refusal"
+  pass "with no lsof, a live process rooted in the clone worktree blocks lock removal"
+}
+
+test_non_windows_uname_keeps_the_missing_lsof_refusal() {
+  local home fakebin clone out err before proc_root
+  home=$(new_home)
+  fakebin="$home/fb-nonwin"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" nonwinlock)
+  plant_packed_refs_lock "$clone"
+  # Every native probe answers "provably free", but a non-Windows platform must
+  # never consult them: with no lsof the answer stays "cannot tell".
+  windows_uname "$fakebin" Linux
+  windows_file_probe "$fakebin" free
+  proc_root=$(windows_proc_fixture "$home" nonwin)
+  before=$(head_sha "$clone")
+  out="$home/out-nonwin"; err="$home/err-nonwin"
+
+  set +e
+  FLEET_TEST_PATH=$(fm_test_path_without_lsof "$home") \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" nonwinlock
+  set -e
+
+  assert_grep "is not provably stale" "$err" \
+    "non-windows missing lsof: guard did not keep the fail-safe refusal"
+  assert_no_grep "removed provably-stale packed-refs lock" "$err" \
+    "non-windows missing lsof: the native probe ran on a non-Windows uname"
+  assert_present "$clone/.git/packed-refs.lock" "non-windows missing lsof: lock must not be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "non-windows missing lsof: clone was advanced despite the refusal"
+  pass "a non-Windows uname with no lsof keeps answering cannot-tell, native probes present or not"
+}
+
 test_transient_packed_refs_lock_self_clears() {
   local home fakebin clone out err counter
   home=$(new_home)
@@ -626,5 +831,10 @@ test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
+test_windows_stale_packed_refs_lock_recovers
+test_windows_live_packed_refs_lock_is_never_removed
+test_windows_probe_error_never_removes_packed_refs_lock
+test_windows_live_process_in_clone_dir_blocks_removal
+test_non_windows_uname_keeps_the_missing_lsof_refusal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
