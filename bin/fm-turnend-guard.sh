@@ -127,6 +127,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -337,6 +339,31 @@ failure_episode_verified() {
     *) return 1 ;;
   esac
 }
+
+# --- deferral: another live session owns this home ---------------------------
+# The Stop-owned auto-arm deliberately defers (exit 0) whenever the home's
+# session lock is held by a DIFFERENT live verified harness, because only the
+# lock-owning session may arm or repair supervision. Without this matching
+# allow, a second attended session can never end a turn while the owner
+# idles: its auto-arm stays inert as a deferral rather than a failure, so no
+# failure episode is ever verified and the block budget can never progress to
+# the attended fail-open. Mirror the auto-arm's exact predicate - not owned
+# by this session's ancestry AND holder alive as a verified harness - and
+# defer with a visible notice instead of blocking. A missing, malformed, or
+# dead-holder lock falls through to the ordinary predicate, where this
+# session's own auto-arm is the recovery owner.
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  DEFER_LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$DEFER_LOCK_PID" in
+    ''|*[!0-9]*) : ;;
+    *)
+      if fm_harness_pid_alive "$DEFER_LOCK_PID"; then
+        printf '{"systemMessage":"firstmate turn-end guard: supervision deferred to the live session holding the fleet lock (harness pid %s); this session cannot arm from a read-only role and does not block on that lapse."}\n' "$DEFER_LOCK_PID"
+        exit 0
+      fi
+      ;;
+  esac
+fi
 
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
