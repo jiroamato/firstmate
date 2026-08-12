@@ -289,7 +289,11 @@ test_hook_non_claude_health_ignores_claude_budget_contention() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-non-claude-budget-contention")
   home=$(cd "$dir" && pwd)
   : > "$dir/state/task1.meta"
-  sleep 60 &
+  # 600, not 60: this fixture watcher must outlive SEVEN sequential guard
+  # invocations, and on Windows MSYS each invocation costs ~5-6s of fork
+  # overhead - a 60s lifetime dies mid-loop and fails whichever harness
+  # iteration the clock lands on (observed live: Pi, pi-signed, Kimi).
+  sleep 600 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
     kill "$pid" 2>/dev/null || true
@@ -301,7 +305,9 @@ test_hook_non_claude_health_ignores_claude_budget_contention() {
   printf 'session=claude-episode\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   printf 'notice-state\n' > "$dir/state/.claude-autoarm-failure-notified"
   printf 'alarm-state\n' > "$dir/state/.claude-autoarm-failure-alarmed"
-  sleep 60 &
+  # Same 600s margin: the budget-lock holder must stay alive across the loop
+  # so contention remains real for every harness iteration.
+  sleep 600 &
   holder=$!
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"

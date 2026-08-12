@@ -352,7 +352,13 @@ failure_episode_verified() {
 # defer with a visible notice instead of blocking. A missing, malformed, or
 # dead-holder lock falls through to the ordinary predicate, where this
 # session's own auto-arm is the recovery owner.
-if ! fm_session_lock_owned_by_self "$STATE"; then
+# Scoped to --claude explicitly: the deferral reasons about Claude's
+# Stop-owned auto-arm, and the ancestry resolution behind
+# fm_session_lock_owned_by_self is expensive on Windows (a PowerShell CIM
+# walk), so no other harness mode should ever pay for or depend on it. Today
+# this point is only reachable in --claude mode; the guard makes that
+# explicit rather than positional.
+if [ "$CLAUDE_MODE" -eq 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
   DEFER_LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$DEFER_LOCK_PID" in
     ''|*[!0-9]*) : ;;
