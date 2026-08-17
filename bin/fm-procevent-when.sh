@@ -16,13 +16,17 @@
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
 #            binds a custom check. BOTH executables are resolved and their
-#            bytes hash-bound at registration: the action is checked again
-#            immediately before the fire is claimed, and the condition is
-#            checked before every poll, so a swapped condition can never decide
-#            when the bound action fires. The runner refuses a mutated spec,
-#            condition, or action without executing anything. Both argv vectors
-#            are executed directly with no shell, so nothing is re-split or
-#            interpreted.
+#            bytes hash-bound at registration, then executed from a private
+#            hash-validated snapshot: the action immediately before the fire
+#            is claimed, the condition before every poll. Validated bytes and
+#            executed bytes are the same private file, so neither a swapped
+#            condition nor a check-to-use pathname race can decide when or
+#            what fires. The runner refuses a mutated spec, condition, or
+#            action without executing anything. Both argv vectors are executed
+#            directly with no shell, so nothing is re-split or interpreted.
+#            Because snapshots run from the watch directory, a bound
+#            executable must reference helpers by absolute path, never
+#            relative to its own $0.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -326,6 +330,27 @@ spec_load() {
 
 # --- run ---------------------------------------------------------------------
 
+# stage_bound_executable <source-path> <expected-sha256>
+# Copy the registered executable into the private 0700 watch directory, hash
+# the STAGED bytes, and print the staged path only when they match the trust
+# binding. The validated bytes and the executed bytes are then the same
+# private file, so a pathname replaced between check and use can at worst
+# change what gets staged BEFORE hashing - which the hash refuses - never what
+# runs after validation. This is the same hash-validated private-snapshot
+# contract the watcher applies to custom state checks. Consequence, documented
+# here on purpose: the snapshot runs from the watch directory, so a bound
+# executable must not resolve helpers relative to its own $0; use absolute
+# paths inside bound scripts.
+stage_bound_executable() {  # <source-path> <expected-sha256>
+  local src=$1 want=$2 staged hash
+  staged=$(umask 077; mktemp "$WHEN_DIR/.exec.XXXXXX") || return 1
+  if ! cp -- "$src" "$staged" 2>/dev/null; then rm -f -- "$staged"; return 1; fi
+  hash=$(fm_pr_sha256 "$staged") || { rm -f -- "$staged"; return 1; }
+  if [ "$hash" != "$want" ]; then rm -f -- "$staged"; return 1; fi
+  chmod 0700 "$staged" || { rm -f -- "$staged"; return 1; }
+  printf '%s\n' "$staged"
+}
+
 # bounded_run <timeout-secs> <output-file> <argv>...
 # Run argv directly with combined output captured, bounded by the timeout.
 # Returns the command's exit status, or 124 on timeout.
@@ -354,7 +379,7 @@ emit_doc() {
 
 cmd_run() {
   local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now
-  local current_condition_hash
+  local staged_exec
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
 
@@ -381,7 +406,7 @@ cmd_run() {
     emit_doc "$sid" rejected "cannot stage command output; nothing was executed" 0 '' ''
     exit 0
   fi
-  trap 'rm -f -- "$out"' EXIT
+  trap 'rm -f -- "$out" "${staged_exec:-}"' EXIT
 
   while :; do
     now=$(date +%s)
@@ -390,19 +415,20 @@ cmd_run() {
         "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' ''
       exit 0
     fi
-    # Revalidate the registered condition bytes before every poll. The watch is
-    # long-lived, and the condition decides WHEN the bound action fires, so a
-    # condition that no longer matches its trust binding must stop the watch
-    # without polling - the same contract the action's own bytes carry at the
+    # Revalidate and snapshot the registered condition bytes before every
+    # poll. The watch is long-lived, and the condition decides WHEN the bound
+    # action fires, so a condition that no longer matches its trust binding
+    # must stop the watch without polling, and the bytes that were validated
+    # must be the bytes that run - the same contract the action carries at the
     # fire boundary below.
-    current_condition_hash=$(fm_pr_sha256 "${COND_ARGV[0]}") || current_condition_hash=
-    if [ "$current_condition_hash" != "$SPEC_CONDITION_SHA256" ]; then
+    if ! staged_exec=$(stage_bound_executable "${COND_ARGV[0]}" "$SPEC_CONDITION_SHA256"); then
       emit_doc "$sid" rejected \
         "refused without polling: the condition executable's bytes do not match the registered trust binding" "$polls" '' ''
       exit 0
     fi
-    bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
+    bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "$staged_exec" "${COND_ARGV[@]:1}"
     rc=$?
+    rm -f -- "$staged_exec"
     polls=$((polls + 1))
     now=$(date +%s)
     if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
@@ -440,11 +466,10 @@ cmd_run() {
     exit 0
   fi
 
-  # Revalidate the registered action bytes immediately before claiming the
-  # fire. A changed or unavailable executable must never be run.
-  local current_action_hash
-  current_action_hash=$(fm_pr_sha256 "${ACT_ARGV[0]}") || current_action_hash=
-  if [ "$current_action_hash" != "$SPEC_ACTION_SHA256" ]; then
+  # Revalidate and snapshot the registered action bytes immediately before
+  # claiming the fire. A changed or unavailable executable must never be run,
+  # and the bytes that were validated must be the bytes that run.
+  if ! staged_exec=$(stage_bound_executable "${ACT_ARGV[0]}" "$SPEC_ACTION_SHA256"); then
     emit_doc "$sid" rejected \
       "refused without executing the action: its bytes do not match the registered trust binding" "$polls" '' ''
     exit 0
@@ -453,13 +478,15 @@ cmd_run() {
   # Claim the fire durably and exclusively BEFORE the action, so no restart or
   # concurrent runner can ever run the action a second time.
   if ! (umask 077; set -o noclobber; printf '%s\n' "$(date +%s)" > "$fired") 2>/dev/null; then
+    rm -f -- "$staged_exec"
     emit_doc "$sid" ambiguous \
       "another run already claimed the fire; verify the action's effect manually" "$polls" '' ''
     exit 0
   fi
 
-  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"
+  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "$staged_exec" "${ACT_ARGV[@]:1}"
   rc=$?
+  rm -f -- "$staged_exec"
   if [ "$rc" -eq 0 ]; then
     emit_doc "$sid" fired "the condition held and the action exited 0" "$polls" "$rc" "$out"
   else
