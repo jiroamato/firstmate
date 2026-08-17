@@ -20,11 +20,23 @@ fm_current_pid() {
 }
 
 fm_pid_alive() {
-  local pid=$1
+  local pid=$1 proc_root
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  # kill -0 alone is not proof of life on Git Bash/MSYS: a dead pid can keep
+  # probing alive there, which left stale locks unreclaimable and spun lock
+  # waiters forever (#1508 upstream). Everywhere this environment publishes a
+  # per-pid procfs entry for live processes (Linux, WSL, and MSYS all do -
+  # keyed on the capability, never on uname), a missing entry proves death and
+  # overrules the false-positive probe. Hosts without procfs (macOS) keep the
+  # plain kill -0 answer.
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -d "$proc_root/self" ] && [ ! -d "$proc_root/$pid" ]; then
+    return 1
+  fi
+  return 0
 }
 
 fm_pid_identity() {
@@ -823,9 +835,27 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Bounded lock wait. The old unbounded loop could spin forever behind a lock
+# whose recorded holder falsely probed alive (the #1508-upstream hang on Git
+# Bash), and a caller hung inside a library function is invisible to every
+# supervision surface. The bound is generous - these are micro-locks held for
+# file-shuffle critical sections, so a healthy wait is milliseconds - and a
+# timeout REFUSES (returns 1) with the holder named, rather than proceeding
+# unlocked. FM_LOCK_ACQUIRE_TIMEOUT tunes the bound in whole seconds; 0
+# restores the unbounded wait for an operator who explicitly wants it.
 fm_lock_acquire_wait() {
-  local lockdir=$1
+  local lockdir=$1 timeout tries=0 max
+  timeout=${FM_LOCK_ACQUIRE_TIMEOUT:-120}
+  case "$timeout" in
+    ''|*[!0-9]*) timeout=120 ;;
+  esac
+  max=$((timeout * 10))
   while ! fm_lock_try_acquire "$lockdir"; do
+    tries=$((tries + 1))
+    if [ "$max" -gt 0 ] && [ "$tries" -ge "$max" ]; then
+      echo "error: could not acquire lock '$lockdir' within ${timeout}s (recorded holder pid: ${FM_LOCK_HELD_PID:-unknown}); refusing to wait forever" >&2
+      return 1
+    fi
     sleep 0.1
   done
 }
