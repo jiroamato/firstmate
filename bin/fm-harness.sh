@@ -41,6 +41,12 @@ detect_own() {
   # one. It outranks the marker layer deliberately: the operator's explicit
   # declaration is stronger evidence than an inherited env marker, and the
   # variable does not exist unless someone set it on purpose.
+  # SCOPE HAZARD: a VALID name is honored wherever the variable is visible,
+  # and a terminal multiplexer's stored environment reaches every pane it
+  # creates - a profile-exported FM_HARNESS_DECLARED=codex would misidentify
+  # a claude crewmate pane too. Set it per-launch (on the launching command
+  # line), never persistently in a shell profile; docs/configuration.md
+  # carries the same warning.
   case "${FM_HARNESS_DECLARED:-}" in
     '') : ;;
     claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
