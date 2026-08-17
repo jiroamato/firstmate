@@ -18,7 +18,9 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
+# Detection layers: an explicit FM_HARNESS_DECLARED declaration first (for
+# hosts whose process tree cannot testify, e.g. WSL2 pid-1 re-parenting), then
+# verified environment markers, then process ancestry.
 # Record each newly verified env marker here.
 set -u
 
@@ -28,6 +30,27 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
+  # Layer 0: an explicitly declared identity for process trees that cannot
+  # testify. WSL2 re-parents a Herdr-launched shell to pid 1, which removes
+  # the harness from the ancestry chain entirely and made detection return
+  # unknown for a genuinely codex-run session (#2307 upstream) - and codex,
+  # opencode, kimi, and muse publish no verified env marker of their own that
+  # layer 1 could catch. FM_HARNESS_DECLARED is the supported fallback: the
+  # operator or launcher states the harness, and only a verified adapter name
+  # is accepted so a typo or a stale multiplexer environment cannot invent
+  # one. It outranks the marker layer deliberately: the operator's explicit
+  # declaration is stronger evidence than an inherited env marker, and the
+  # variable does not exist unless someone set it on purpose.
+  case "${FM_HARNESS_DECLARED:-}" in
+    '') : ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+      echo "$FM_HARNESS_DECLARED"
+      return
+      ;;
+    *)
+      echo "fm-harness: ignoring FM_HARNESS_DECLARED='$FM_HARNESS_DECLARED': not a verified adapter name" >&2
+      ;;
+  esac
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Only claude, pi, and grok set verified markers of their own; codex, opencode,
