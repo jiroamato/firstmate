@@ -687,6 +687,56 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   pass "unrelated events and stale correlation ids cannot resolve"
 }
 
+# Sender identity survives a WSL2-style wall-clock step (#433 upstream): on a
+# procfs host the identity is the boot-tick starttime plus the cmdline, never
+# the re-rendered lstart date, and a record written in the legacy lstart form
+# before this change still compares on its own terms.
+test_sender_identity_prefers_boot_ticks_and_keeps_legacy_compare() {
+  local home state fakeproc pid identity legacy rec corr
+  home=$(setup_parent identity-boot-ticks)
+  state="$home/state"
+  pid=${BASHPID:-$$}
+
+  # On a real procfs host the new form must be starttime-based.
+  if [ -r "/proc/$pid/stat" ]; then
+    identity=$(fm_pending_reply_pid_identity "$pid") || fail "identity unobservable on procfs host"
+    case "$identity" in
+      starttime=*cmdline-hex=*) : ;;
+      *) fail "procfs host identity must be boot-tick based, got: $identity" ;;
+    esac
+    pass "a procfs host records boot-tick sender identity"
+  else
+    pass "skip: no procfs on this host, boot-tick form covered by fixture below"
+  fi
+
+  # Fixture procfs: identical starttime across two reads even when the wall
+  # clock (which lstart would re-render) has stepped - the drift immunity.
+  fakeproc="$home/fakeproc"
+  mkdir -p "$fakeproc/$pid"
+  printf '%s (bash) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 424242 0 0\n' "$pid" > "$fakeproc/$pid/stat"
+  printf 'bash\0-c\0sender\0' > "$fakeproc/$pid/cmdline"
+  identity=$(FM_PROC_ROOT_OVERRIDE="$fakeproc" fm_pending_reply_pid_identity "$pid") \
+    || fail "fixture identity unobservable"
+  [ "$identity" = "$(FM_PROC_ROOT_OVERRIDE="$fakeproc" fm_pending_reply_pid_identity "$pid")" ] \
+    || fail "boot-tick identity must be stable across reads"
+  case "$identity" in
+    "starttime=424242 cmdline-hex="*) : ;;
+    *) fail "fixture identity should carry the fixture starttime, got: $identity" ;;
+  esac
+  pass "boot-tick identity is stable and carries procfs starttime"
+
+  # Legacy-form record: a recovery_sender_identity written by the old code
+  # (lstart + command) must still match a live sender via the legacy compare.
+  legacy=$(fm_pending_reply_pid_identity_legacy "$pid") || fail "legacy identity unobservable"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy identity compare")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "legacy pid commit failed"
+  fm_pending_reply_set "$rec" recovery_sender_identity "$legacy" || fail "legacy identity commit failed"
+  fm_pending_reply_sender_alive "$rec" \
+    || fail "a legacy-form identity record must still recognize its live sender"
+  pass "a legacy lstart-form identity record still recognizes its live sender"
+}
+
 test_restart_preserves_expectation_and_parent_destination() {
   local home state corr rec parent_status parent_home
   home=$(setup_parent restart)
@@ -1104,6 +1154,7 @@ test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
 test_unrelated_and_stale_corr_cannot_resolve
+test_sender_identity_prefers_boot_ticks_and_keeps_legacy_compare
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
