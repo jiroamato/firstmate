@@ -403,4 +403,31 @@ assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
 assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
 pass "mutated action bytes are refused before claiming the fire"
 
+# --- mutated condition bytes are refused before any poll ---------------------
+# The condition decides WHEN the bound action fires, so it carries the same
+# trust binding as the action: bytes changed after arming stop the watch
+# without polling, and the action never runs.
+H="$TMP_ROOT/h-cond-tamper"; new_home "$H"
+COND_TAMPER_LOG="$TMP_ROOT/cond-tamper-act"
+MUTABLE_COND="$TMP_ROOT/mutable-cond.sh"
+cat > "$MUTABLE_COND" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$MUTABLE_COND"
+when "$H" arm cond-tamper --interval 0.1 --stable 1 \
+  --condition "$MUTABLE_COND" --action touch "$COND_TAMPER_LOG" >/dev/null
+cat > "$MUTABLE_COND" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-cond-tamper || fail "no outcome was captured for the mutated condition"
+RESULT=$(first_result "$H" when-cond-tamper)
+assert_grep 'status: rejected' "$RESULT" "the outcome reports the condition trust refusal"
+assert_grep 'condition executable' "$RESULT" "the refusal names the condition binding"
+assert_absent "$COND_TAMPER_LOG" "the action never ran under the mutated condition"
+assert_absent "$H/state/when/when-cond-tamper.fired" "no fire was claimed under mutated condition bytes"
+pass "mutated condition bytes are refused before any poll"
+
 printf 'all fm-procevent-when tests passed\n'

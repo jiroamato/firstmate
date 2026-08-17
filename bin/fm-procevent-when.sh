@@ -15,11 +15,14 @@
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
-#            binds a custom check. The action executable is resolved and its
-#            bytes are hash-bound at registration, then checked again immediately
-#            before the fire is claimed. The runner refuses a mutated spec or
-#            action without executing anything. Both argv vectors are executed
-#            directly with no shell, so nothing is re-split or interpreted.
+#            binds a custom check. BOTH executables are resolved and their
+#            bytes hash-bound at registration: the action is checked again
+#            immediately before the fire is claimed, and the condition is
+#            checked before every poll, so a swapped condition can never decide
+#            when the bound action fires. The runner refuses a mutated spec,
+#            condition, or action without executing anything. Both argv vectors
+#            are executed directly with no shell, so nothing is re-split or
+#            interpreted.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -186,10 +189,16 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device action_path action_hash
+  local tmp trust_tmp hash device action_path action_hash condition_path condition_hash
   action_path=$(action_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
   act[0]=$action_path
+  # The condition carries the same binding as the action: it decides WHEN the
+  # bound action fires, so a swapped or PATH-shadowed condition is as dangerous
+  # as a swapped action. Resolve it once and pin its bytes.
+  condition_path=$(action_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
+  condition_hash=$(fm_pr_sha256 "$condition_path") || die "cannot hash the condition executable"
+  cond[0]=$condition_path
   device=$(fm_pr_file_device "$WHEN_DIR") || die "cannot inspect the watch directory"
   tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || die "cannot stage the spec"
   {
@@ -202,6 +211,7 @@ cmd_arm() {
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
     printf 'action_sha256=%s\n' "$action_hash"
+    printf 'condition_sha256=%s\n' "$condition_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
     printf 'argv:\n'
@@ -260,7 +270,7 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
-  SPEC_ACTION_SHA256=''
+  SPEC_ACTION_SHA256='' SPEC_CONDITION_SHA256=''
   local cond_argc='' act_argc='' in_argv=0 read_cond=0 read_act=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
@@ -279,6 +289,7 @@ spec_load() {
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
           action_sha256)     SPEC_ACTION_SHA256=$value ;;
+          condition_sha256)  SPEC_CONDITION_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
           *) SPEC_ERROR="spec carries an unknown field: $key"; return 1 ;;
@@ -305,6 +316,8 @@ spec_load() {
   positive_int "$SPEC_ERROR_BUDGET" || { SPEC_ERROR="spec error budget is malformed"; return 1; }
   [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || { SPEC_ERROR="spec action hash is malformed"; return 1; }
+  [[ "$SPEC_CONDITION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { SPEC_ERROR="spec condition hash is malformed"; return 1; }
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
   positive_int "${act_argc:-}" || { SPEC_ERROR="spec action argc is malformed"; return 1; }
   [ "$read_cond" -eq "$cond_argc" ] && [ "$read_act" -eq "$act_argc" ] \
@@ -341,6 +354,7 @@ emit_doc() {
 
 cmd_run() {
   local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now
+  local current_condition_hash
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
 
@@ -374,6 +388,17 @@ cmd_run() {
     if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
       emit_doc "$sid" never-true \
         "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' ''
+      exit 0
+    fi
+    # Revalidate the registered condition bytes before every poll. The watch is
+    # long-lived, and the condition decides WHEN the bound action fires, so a
+    # condition that no longer matches its trust binding must stop the watch
+    # without polling - the same contract the action's own bytes carry at the
+    # fire boundary below.
+    current_condition_hash=$(fm_pr_sha256 "${COND_ARGV[0]}") || current_condition_hash=
+    if [ "$current_condition_hash" != "$SPEC_CONDITION_SHA256" ]; then
+      emit_doc "$sid" rejected \
+        "refused without polling: the condition executable's bytes do not match the registered trust binding" "$polls" '' ''
       exit 0
     fi
     bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
