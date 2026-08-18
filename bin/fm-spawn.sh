@@ -2387,9 +2387,13 @@ EOF
 // never clear the worker's busy state. The session.idle touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+// The writer runs via bash, not as a direct executable: a native Windows node
+// host cannot exec a shebang .sh file (execFile fails, and the fire-and-forget
+// callback would swallow it silently, leaving busy state permanently stale).
+// bash is on PATH wherever firstmate runs and owns the script's path form.
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    execFile("bash", ["$FM_ROOT/bin/fm-busy-event.sh",
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
@@ -2443,9 +2447,13 @@ EOF
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
+// The writer runs via bash, not as a direct executable: a native Windows node
+// host cannot exec a shebang .sh file (execFile fails, and the fire-and-forget
+// callback would swallow it silently, leaving busy state permanently stale).
+// bash is on PATH wherever firstmate runs and owns the script's path form.
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    execFile("bash", ["$FM_ROOT/bin/fm-busy-event.sh",
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
