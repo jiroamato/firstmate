@@ -1,10 +1,10 @@
 <h1 align="center">firstmate</h1>
 <p align="center">
   <a
-    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(experimental)-blue?style=flat-square"
     ><img
       alt="Platform"
-      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(experimental)-blue?style=flat-square"
   /></a>
   <a href="https://x.com/kunchenguid"
     ><img
@@ -57,6 +57,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ## Quick Start
 
 ### Requirements
+
+firstmate runs on macOS and Linux; Windows support (via Git Bash/MSYS) is experimental on this fork - hardened, but still gathering soak time.
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
