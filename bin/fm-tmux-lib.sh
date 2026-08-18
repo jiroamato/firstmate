@@ -58,8 +58,10 @@
 # rotating tip text follows and is not required to be present. The idle status
 # bar's lowercase `thinking` label and independently rotating tip text are not
 # busy signals on their own.
-# The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
-# exposes no stable ASCII busy token.
+# The full moon-phase set remains emoji-font-sensitive because Kimi exposes no
+# stable ASCII busy token; the matcher greps it under LC_ALL=C so the UTF-8
+# bytes compare bytewise - MSYS grep 3.0 fails to match the emoji alternation
+# with -i under a UTF-8 locale, misreading a busy Kimi pane as idle.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
@@ -89,7 +91,10 @@ fm_busy_lines_match() {  # [harness]
         ;;
     esac
   fi
-  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+  # LC_ALL=C: bytewise matching keeps the multibyte signatures (moon phases,
+  # ellipsis, middle dot) deterministic on every host grep; -i still folds the
+  # ASCII tokens, and none of the signatures need locale case folding.
+  [ -n "$regex" ] && printf '%s' "$lines" | LC_ALL=C grep -qiE "$regex"
 }
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
