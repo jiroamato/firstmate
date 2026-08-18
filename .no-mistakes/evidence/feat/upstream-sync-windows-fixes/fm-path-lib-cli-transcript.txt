@@ -1,0 +1,26 @@
+# bin/fm-path-lib.sh driven live on the Windows host (Git Bash / MSYS):
+
+$ fm_path_host
+msys
+
+$ fm_path_to_posix 'C:\Users\amato\project\worktree'   # native pane answer -> POSIX
+/c/Users/amato/project/worktree
+
+$ fm_path_to_posix 'C:/Users/amato/project'               # forward-slash drive form
+/c/Users/amato/project
+
+$ fm_path_to_posix '/c/Users/amato/project'               # already POSIX: passthrough
+/c/Users/amato/project
+
+$ fm_path_to_native '/c/Users/amato/project'              # POSIX -> what a native tool needs
+C:\Users\amato\project
+
+# CRLF pane capture: trailing CR is stripped before translation (od shows no \r byte):
+$ fm_path_to_posix 'C:\Users\amato\wt<CR>' | od -c
+0000000   /   c   /   U   s   e   r   s   /   a   m   a   t   o   /   w
+0000020   t  \n
+0000022
+
+# Refusal to guess: Windows-form path where no translator exists must fail, not guess:
+$ fm_path_to_posix 'C:\Users\amato\project\worktree'   # host reports no cygpath/wslpath
+refused: exit 1 (no silent guess)

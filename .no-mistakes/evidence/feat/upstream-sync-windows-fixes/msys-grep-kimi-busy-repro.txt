@@ -1,0 +1,17 @@
+$ grep --version | head -1
+grep (GNU grep) 3.0
+
+# Kimi busy spinner line as captured from a real pane:
+  🌑 · thinking (3s)
+
+# 1) The upstream behavior (grep -iE under the default UTF-8 locale) on this host:
+NO MATCH -> busy Kimi misread as idle (the Windows bug)
+
+# 2) Same input, same regex, bytewise under LC_ALL=C (the fix):
+MATCH (busy detected correctly)
+
+# 3) The real product function fm_busy_lines_match (bin/fm-tmux-lib.sh) on this host:
+busy Kimi pane classified BUSY (fixed)
+
+# 4) Guard: bare moon glyph in ordinary output still must NOT classify busy:
+correctly NOT busy

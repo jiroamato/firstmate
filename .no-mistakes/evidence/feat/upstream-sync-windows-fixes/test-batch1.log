@@ -1,0 +1,70 @@
+FM_TEST_BEGIN 2026-08-18T12:57:17Z tests/fm-path-lib.test.sh family=unclassified expected_gate_skip=none
+ok - windows-form classification separates drive-letter forms from posix forms
+ok - a posix path passes through fm_path_to_posix unchanged
+ok - a trailing carriage return is stripped before classification
+ok - empty input is refused
+ok - skip: host is not posix, refusal case exercised by shim below
+ok - a windows form translates through cygpath on an msys host
+ok - a missing translator refuses instead of passing the windows form through
+fm-path-lib: all tests passed
+FM_TEST_END 2026-08-18T12:57:20Z tests/fm-path-lib.test.sh exit=0 duration_ms=3000 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T12:57:20Z tests/fm-lock-bounded-wait.test.sh family=unclassified expected_gate_skip=none
+ok - a live pid with a procfs entry reads alive
+ok - a missing procfs entry proves death even when kill -0 says alive
+ok - a host without procfs keeps the plain kill -0 answer
+ok - a bounded wait refuses a live-held lock within its bound and names the holder
+ok - an uncontended lock acquires immediately under the bounded wait
+ok - a dead-holder lock is reclaimed within the bound
+ok - fm_wake_append refuses a timed-out lock wait without touching the queue
+ok - fm_wake_queued_keys refuses the unlocked read on a timed-out lock wait
+fm-lock-bounded-wait: all tests passed
+FM_TEST_END 2026-08-18T12:57:44Z tests/fm-lock-bounded-wait.test.sh exit=0 duration_ms=24000 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T12:57:44Z tests/fm-harness-declared.test.sh family=unclassified expected_gate_skip=none
+ok - a declared verified adapter outranks an inherited env marker
+ok - every verified adapter name is accepted as declared identity
+ok - an unverified declared name is ignored loudly and detection falls through
+ok - an empty declaration leaves marker detection untouched
+fm-harness-declared: all tests passed
+FM_TEST_END 2026-08-18T12:57:46Z tests/fm-harness-declared.test.sh exit=0 duration_ms=2000 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T12:57:46Z tests/fm-pr-private-mode-capability.test.sh family=unclassified expected_gate_skip=none
+ok - the real probe on a mode-incapable Windows host substitutes the owner match
+skip: state filesystem cannot hold POSIX modes (posix-strict and acl-mount sections)
+ok - a provably mode-incapable filesystem substitutes the owner match
+fm-pr-private-mode-capability: all tests passed
+FM_TEST_END 2026-08-18T12:57:50Z tests/fm-pr-private-mode-capability.test.sh exit=0 duration_ms=4000 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T12:57:50Z tests/fm-tmux-submit-busy.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - fm_tmux_submit_enter_core: busy pane + pending composer returns empty (message queued)
+ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
+ok - fm_tmux_submit_enter_core: wrapped input retains swallowed-Enter retries
+ok - fm_tmux_submit_enter_core: placeholder-like bare input retains swallowed-Enter retries
+ok - fm_tmux_submit_enter_core: busy pane clears composer on first Enter - returns empty
+ok - fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before
+ok - fm_tmux_submit_enter_core: busy conversion is limited to proven pending input
+ok - fm_tmux_submit_core: failed baseline capture disables busy unknown conversion
+ok - fm_tmux_submit_enter_core: pending-unproven retries without busy conversion
+ok - fm_tmux_submit_enter_core: unrecognized states skip busy conversion
+ok - fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible
+FM_TEST_END 2026-08-18T12:58:36Z tests/fm-tmux-submit-busy.test.sh exit=0 duration_ms=46000 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T12:58:36Z tests/fm-spawn-worktree-settle.test.sh family=backend-dispatch expected_gate_skip=none
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+ok - a single transient stale pane_current_path read is not accepted as the worktree
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+ok - an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+ok - a cwd-blind pane still spawns through the git-rev-parse pane probe
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+ok - a probe that can only answer the primary checkout refuses the spawn
+# all fm-spawn-worktree-settle tests passed
+FM_TEST_END 2026-08-18T12:59:32Z tests/fm-spawn-worktree-settle.test.sh exit=0 duration_ms=56000 gate_skip=false
+FM_TEST_SUMMARY total=6 failed=0 skipped_gate=0 duration_ms=135000
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=1 duration_ms=56000 failed=0
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=46000 failed=0
+FM_TEST_SUMMARY_FAMILY family=unclassified count=4 duration_ms=33000 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-spawn-worktree-settle.test.sh duration_ms=56000
+FM_TEST_SLOWEST rank=2 script=tests/fm-tmux-submit-busy.test.sh duration_ms=46000
+FM_TEST_SLOWEST rank=3 script=tests/fm-lock-bounded-wait.test.sh duration_ms=24000
+FM_TEST_SLOWEST rank=4 script=tests/fm-pr-private-mode-capability.test.sh duration_ms=4000
+FM_TEST_SLOWEST rank=5 script=tests/fm-path-lib.test.sh duration_ms=3000
+FM_TEST_SLOWEST rank=6 script=tests/fm-harness-declared.test.sh duration_ms=2000

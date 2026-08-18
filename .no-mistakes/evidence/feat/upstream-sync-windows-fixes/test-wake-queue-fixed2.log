@@ -1,0 +1,19 @@
+FM_TEST_BEGIN 2026-08-18T14:49:38Z tests/fm-wake-queue.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - an abandoned same-process lock hold is reclaimed; a parent's live hold is not
+ok - self-announced appends suppress only their own bytes and fail toward waking
+ok - historical annotations replay nothing already announced and keep everything new
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 17 --recovery-generation 301132.1787064747.NaMmxZ
+ok - concurrent append plus drain preserves durable records through acknowledgement
+ok - signal written while no watcher runs is caught on next run
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 352109.1787067045.gUiZnu
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - stale wake is queued before suppressor state is advanced
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 353782.1787067147.Y4FSLs
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - a not-provably-working stale wake is queued before its suppressor is advanced
+not ok - watcher did not print check wake
+FM_TEST_END 2026-08-18T15:34:07Z tests/fm-wake-queue.test.sh exit=1 duration_ms=2669000 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=2670000
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=2669000 failed=1
+FM_TEST_SLOWEST rank=1 script=tests/fm-wake-queue.test.sh duration_ms=2669000
+EXIT=1

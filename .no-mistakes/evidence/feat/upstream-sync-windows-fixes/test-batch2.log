@@ -1,0 +1,46 @@
+FM_TEST_BEGIN 2026-08-18T12:59:53Z tests/fm-wake-queue.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - an abandoned same-process lock hold is reclaimed; a parent's live hold is not
+ok - self-announced appends suppress only their own bytes and fail toward waking
+ok - historical annotations replay nothing already announced and keep everything new
+      0 [main] bash 122458 dofork: child -1 - forked process 33848 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      1 [main] bash 129258 dofork: child -1 - forked process 34368 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      1 [main] bash 122211 dofork: child -1 - forked process 11992 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122225 dofork: child -1 - forked process 29276 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122493 dofork: child -1 - forked process 12112 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122330 dofork: child -1 - forked process 15180 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122674 dofork: child -1 - forked process 26164 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+      0 [main] bash 122786 dofork: child -1 - forked process 25988 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+      0 [main] bash 122720 dofork: child -1 - forked process 13080 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+      0 [main] bash 122681 dofork: child -1 - forked process 29840 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122534 dofork: child -1 - forked process 31976 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 129303 dofork: child -1 - forked process 24036 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122300 dofork: child -1 - forked process 6852 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122258 dofork: child -1 - forked process 26744 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122407 dofork: child -1 - forked process 18784 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122245 dofork: child -1 - forked process 34652 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122428 dofork: child -1 - forked process 31420 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122806 dofork: child -1 - forked process 21656 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      1 [main] bash 122192 dofork: child -1 - forked process 26096 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+      0 [main] bash 122286 dofork: child -1 - forked process 512 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+      0 [main] bash 122381 dofork: child -1 - forked process 30596 died unexpectedly, retry 0, exit code 0xC0000142, errno 11
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
+/c/Users/amato/.no-mistakes/worktrees/ee8de15012e3/01M0AE3B3G39TWSM5KB7GC7PKK/bin/fm-wake-lib.sh: fork: retry: Resource temporarily unavailable
