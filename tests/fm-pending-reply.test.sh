@@ -727,14 +727,21 @@ test_sender_identity_prefers_boot_ticks_and_keeps_legacy_compare() {
 
   # Legacy-form record: a recovery_sender_identity written by the old code
   # (lstart + command) must still match a live sender via the legacy compare.
-  legacy=$(fm_pending_reply_pid_identity_legacy "$pid") || fail "legacy identity unobservable"
-  corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy identity compare")
-  rec=$(fm_pending_reply_path "$state" "$corr")
-  fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "legacy pid commit failed"
-  fm_pending_reply_set "$rec" recovery_sender_identity "$legacy" || fail "legacy identity commit failed"
-  fm_pending_reply_sender_alive "$rec" \
-    || fail "a legacy-form identity record must still recognize its live sender"
-  pass "a legacy lstart-form identity record still recognizes its live sender"
+  # The legacy form only ever existed where the host ps could print it - MSYS
+  # ps has no -o at all, so on such hosts no legacy record can exist and the
+  # compare has nothing real to protect.
+  if COLUMNS=10000 LC_ALL=C ps -p "$$" -o lstart= -o command= >/dev/null 2>&1; then
+    legacy=$(fm_pending_reply_pid_identity_legacy "$pid") || fail "legacy identity unobservable"
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy identity compare")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "legacy pid commit failed"
+    fm_pending_reply_set "$rec" recovery_sender_identity "$legacy" || fail "legacy identity commit failed"
+    fm_pending_reply_sender_alive "$rec" \
+      || fail "a legacy-form identity record must still recognize its live sender"
+    pass "a legacy lstart-form identity record still recognizes its live sender"
+  else
+    echo "skip: host ps lacks -o lstart (legacy identity compare)"
+  fi
 }
 
 test_restart_preserves_expectation_and_parent_destination() {
@@ -942,7 +949,12 @@ test_unknown_backend_state_uses_capture_fallback() {
   pass "tmux and zellij unknown states use bounded capture fallback"
 }
 
-test_kimi_capture_fallback_uses_recorded_harness() (
+# Body runs in a subshell to scope the fixture clock and function overrides,
+# but a subshell-bodied function's exit does not stop the script - the caller
+# must propagate it, or a failing assertion inside prints "not ok" while the
+# suite still reports success.
+test_kimi_capture_fallback_uses_recorded_harness() {
+  (
   local home state corr rec sm_home
   home=$(setup_parent kimi-fallback)
   state="$home/state"
@@ -971,7 +983,8 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
     || fail "working Kimi secondmate entered recovery"
   pass "pending replies scope Kimi capture fallback by recorded harness"
-)
+  ) || fail "kimi capture fallback test failed in its isolated subshell"
+}
 
 test_tick_skips_terminal_and_reuses_target_observation() {
   (

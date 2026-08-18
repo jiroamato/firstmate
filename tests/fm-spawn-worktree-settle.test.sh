@@ -122,22 +122,24 @@ test_single_stale_first_read_is_not_accepted() {
 
 # A pane that reports the real worktree from the very first read still only
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
-# extra full cycle on top of that.
+# extra full cycle on top of that. Asserted as the pane-poll count the fake
+# tmux records (first read + one confirming read = exactly 2), not wall-clock
+# time, which bundles the whole spawn script's startup and varies wildly with
+# host process-spawn speed (an MSYS host needs several seconds before the
+# settle loop even starts).
 test_already_settled_pane_costs_one_confirm_sleep() {
-  local rec id out status start end elapsed
+  local rec id out status polls
   id=settle-already-settled-z2
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
 
-  start=$(date +%s)
   out=$(run_settle_spawn "$id")
   status=$?
-  end=$(date +%s)
-  elapsed=$((end - start))
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
-  [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
+  polls=$(cat "$COUNTFILE" 2>/dev/null || echo 0)
+  [ "$polls" = 2 ] || fail "already-settled pane took $polls pane polls to confirm - expected the first read plus one confirming read"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
