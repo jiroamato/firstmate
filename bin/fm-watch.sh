@@ -187,7 +187,9 @@ _event_cap_fails=0
 afk_present() { [ -e "$STATE/.afk" ]; }
 
 hash_pane() {
-  if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+  # Prefer md5sum: on Windows a PATH entry named `md5` can be a non-program
+  # (e.g. R's checksum manifest) that `command -v` still resolves.
+  if command -v md5sum >/dev/null 2>&1; then md5sum | cut -d' ' -f1; else md5 -q; fi
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through

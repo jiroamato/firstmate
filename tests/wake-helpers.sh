@@ -300,10 +300,12 @@ is_live_non_zombie() {
 }
 
 hash_text() {
-  if command -v md5 >/dev/null 2>&1; then
-    printf '%s' "$1" | md5 -q
-  else
+  # Prefer md5sum: on Windows a PATH entry named `md5` can be a non-program
+  # (e.g. R's checksum manifest) that `command -v` still resolves.
+  if command -v md5sum >/dev/null 2>&1; then
     printf '%s' "$1" | md5sum | cut -d' ' -f1
+  else
+    printf '%s' "$1" | md5 -q
   fi
 }
 
