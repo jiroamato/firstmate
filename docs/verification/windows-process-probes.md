@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record holds the platform evidence behind the no-lsof branch of `bin/fm-lock-lib.sh`'s staleness proof and of `bin/fm-teardown.sh`'s leaked-process reaper.
+This record holds the platform evidence behind the no-lsof branch of `bin/fm-lock-lib.sh`'s staleness proof, `bin/fm-teardown.sh`'s leaked-process reaper, and the missing-procfs-entry death verdict in `bin/fm-wake-lib.sh`'s `fm_pid_alive`, which relies on the fact shown below that MSYS registers every Git Bash descendant, native or not, in its process table.
 Those files own the decision procedure and the mechanics; this record owns why the Windows answers count as proof, because CI never runs there.
 Re-establish it after a Git for Windows or MSYS runtime upgrade.
 
