@@ -306,6 +306,53 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   pass "second missed turn escalates once and remains durable"
 }
 
+# Wake-gate helpers reading the production seen-signature owner directly, so
+# these assertions consume the exact gate the watcher's signal scan uses.
+seen_gate() {  # <state> <file>: 0 when every byte is already announced
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_wake_signal_seen_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+prime_seen() {  # <state> <file>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"; sig=$(fm_wake_signal_sig "$3") || exit 1
+    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+
+test_escalation_wakes_and_its_close_stays_quiet() {
+  local home state corr
+  home=$(setup_parent escalation-wake-gate)
+  state="$home/state"
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_NOW=4200
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "confirm the notarization")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  : > "$state/hibit.status"
+  prime_seen "$state" "$state/hibit.status" || fail "could not prime the announced baseline"
+  # A NEW blocker must wake: the escalation append leaves unannounced bytes.
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new pending-reply escalation was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the escalation announced"
+  # A genuinely new correlated reply must wake too.
+  printf 'done [corr=%s]: notarization confirmed\n' "$corr" >> "$state/hibit.status"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new correlated reply was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the reply announced"
+  # The home's own escalation CLOSE is bookkeeping and stays quiet.
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated reply should resolve"
+  grep -Fq "resolved [key=pending-reply-$corr]" "$state/hibit.status" \
+    || fail "resolution did not close the escalation decision"
+  seen_gate "$state" "$state/hibit.status" \
+    || fail "the home's own escalation close re-woke its own watcher gate"
+  pass "escalations and replies wake; the home's own escalation close stays quiet"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -640,6 +687,63 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   pass "unrelated events and stale correlation ids cannot resolve"
 }
 
+# Sender identity survives a WSL2-style wall-clock step (#433 upstream): on a
+# procfs host the identity is the boot-tick starttime plus the cmdline, never
+# the re-rendered lstart date, and a record written in the legacy lstart form
+# before this change still compares on its own terms.
+test_sender_identity_prefers_boot_ticks_and_keeps_legacy_compare() {
+  local home state fakeproc pid identity legacy rec corr
+  home=$(setup_parent identity-boot-ticks)
+  state="$home/state"
+  pid=${BASHPID:-$$}
+
+  # On a real procfs host the new form must be starttime-based.
+  if [ -r "/proc/$pid/stat" ]; then
+    identity=$(fm_pending_reply_pid_identity "$pid") || fail "identity unobservable on procfs host"
+    case "$identity" in
+      starttime=*cmdline-hex=*) : ;;
+      *) fail "procfs host identity must be boot-tick based, got: $identity" ;;
+    esac
+    pass "a procfs host records boot-tick sender identity"
+  else
+    pass "skip: no procfs on this host, boot-tick form covered by fixture below"
+  fi
+
+  # Fixture procfs: identical starttime across two reads even when the wall
+  # clock (which lstart would re-render) has stepped - the drift immunity.
+  fakeproc="$home/fakeproc"
+  mkdir -p "$fakeproc/$pid"
+  printf '%s (bash) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 424242 0 0\n' "$pid" > "$fakeproc/$pid/stat"
+  printf 'bash\0-c\0sender\0' > "$fakeproc/$pid/cmdline"
+  identity=$(FM_PROC_ROOT_OVERRIDE="$fakeproc" fm_pending_reply_pid_identity "$pid") \
+    || fail "fixture identity unobservable"
+  [ "$identity" = "$(FM_PROC_ROOT_OVERRIDE="$fakeproc" fm_pending_reply_pid_identity "$pid")" ] \
+    || fail "boot-tick identity must be stable across reads"
+  case "$identity" in
+    "starttime=424242 cmdline-hex="*) : ;;
+    *) fail "fixture identity should carry the fixture starttime, got: $identity" ;;
+  esac
+  pass "boot-tick identity is stable and carries procfs starttime"
+
+  # Legacy-form record: a recovery_sender_identity written by the old code
+  # (lstart + command) must still match a live sender via the legacy compare.
+  # The legacy form only ever existed where the host ps could print it - MSYS
+  # ps has no -o at all, so on such hosts no legacy record can exist and the
+  # compare has nothing real to protect.
+  if COLUMNS=10000 LC_ALL=C ps -p "$$" -o lstart= -o command= >/dev/null 2>&1; then
+    legacy=$(fm_pending_reply_pid_identity_legacy "$pid") || fail "legacy identity unobservable"
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy identity compare")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" recovery_sender_pid "$pid" || fail "legacy pid commit failed"
+    fm_pending_reply_set "$rec" recovery_sender_identity "$legacy" || fail "legacy identity commit failed"
+    fm_pending_reply_sender_alive "$rec" \
+      || fail "a legacy-form identity record must still recognize its live sender"
+    pass "a legacy lstart-form identity record still recognizes its live sender"
+  else
+    echo "skip: host ps lacks -o lstart (legacy identity compare)"
+  fi
+}
+
 test_restart_preserves_expectation_and_parent_destination() {
   local home state corr rec parent_status parent_home
   home=$(setup_parent restart)
@@ -845,7 +949,12 @@ test_unknown_backend_state_uses_capture_fallback() {
   pass "tmux and zellij unknown states use bounded capture fallback"
 }
 
-test_kimi_capture_fallback_uses_recorded_harness() (
+# Body runs in a subshell to scope the fixture clock and function overrides,
+# but a subshell-bodied function's exit does not stop the script - the caller
+# must propagate it, or a failing assertion inside prints "not ok" while the
+# suite still reports success.
+test_kimi_capture_fallback_uses_recorded_harness() {
+  (
   local home state corr rec sm_home
   home=$(setup_parent kimi-fallback)
   state="$home/state"
@@ -874,7 +983,8 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
     || fail "working Kimi secondmate entered recovery"
   pass "pending replies scope Kimi capture fallback by recorded harness"
-)
+  ) || fail "kimi capture fallback test failed in its isolated subshell"
+}
 
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
@@ -1046,6 +1156,7 @@ test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
 test_legacy_escalation_does_not_close_taken_default_decision
@@ -1056,6 +1167,7 @@ test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
 test_unrelated_and_stale_corr_cannot_resolve
+test_sender_identity_prefers_boot_ticks_and_keeps_legacy_compare
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation

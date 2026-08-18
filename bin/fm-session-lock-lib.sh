@@ -121,6 +121,10 @@ fm_harness_windows_ancestry_snapshot() {  # <native-pid>
   # This is only an optimization: bash re-applies the real matching policy to
   # every emitted row, and an under-stopped walk merely emits extra rows.
   # Measured ~3s for a full-table snapshot vs a few hundred ms this way.
+  # The single quotes are deliberate: the payload is a PowerShell script whose
+  # $-variables must reach PowerShell literally, with the two bash values
+  # spliced in through the standard '"$var"' quote-break pattern.
+  # shellcheck disable=SC2016
   MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command '
     $re="'"$FM_HARNESS_RE"'"
     $p=[int]'"$start"'

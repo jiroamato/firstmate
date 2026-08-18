@@ -1,10 +1,10 @@
 <h1 align="center">firstmate</h1>
 <p align="center">
   <a
-    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+    href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(experimental)-blue?style=flat-square"
     ><img
       alt="Platform"
-      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
+      src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(experimental)-blue?style=flat-square"
   /></a>
   <a href="https://x.com/kunchenguid"
     ><img
@@ -57,6 +57,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ## Quick Start
 
 ### Requirements
+
+firstmate runs on macOS and Linux; Windows support (via Git Bash/MSYS) is experimental on this fork - hardened, but still gathering soak time.
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
@@ -173,7 +175,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
-| `/stow`            | Sweep the session for uncaptured durable knowledge, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
+| `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
 Bearings invocation examples:
 

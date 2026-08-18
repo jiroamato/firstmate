@@ -122,26 +122,149 @@ test_single_stale_first_read_is_not_accepted() {
 
 # A pane that reports the real worktree from the very first read still only
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
-# extra full cycle on top of that.
+# extra full cycle on top of that. Asserted as the pane-poll count the fake
+# tmux records (first read + one confirming read = exactly 2), not wall-clock
+# time, which bundles the whole spawn script's startup and varies wildly with
+# host process-spawn speed (an MSYS host needs several seconds before the
+# settle loop even starts).
 test_already_settled_pane_costs_one_confirm_sleep() {
-  local rec id out status start end elapsed
+  local rec id out status polls
   id=settle-already-settled-z2
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
 
-  start=$(date +%s)
   out=$(run_settle_spawn "$id")
   status=$?
-  end=$(date +%s)
-  elapsed=$((end - start))
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
-  [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
+  polls=$(cat "$COUNTFILE" 2>/dev/null || echo 0)
+  [ "$polls" = 2 ] || fail "already-settled pane took $polls pane polls to confirm - expected the first read plus one confirming read"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
+}
+
+# make_probe_fakebin <dir> builds a fake tmux for the cwd-blind case (#1796
+# upstream): `#{pane_current_path}` ALWAYS reports the project directory (the
+# nested-cmd.exe symptom, where the top-level shell's cwd never moves), while
+# send-keys records what the spawn sent and capture-pane answers a recorded
+# worktree probe with FM_FAKE_PROBE_ANSWER followed by that probe's own marker
+# line - simulating a pane that really is inside the worktree and says so when
+# asked with `git rev-parse --show-toplevel`.
+make_probe_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+sendlog="${FM_FAKE_SEND_LOG:?FM_FAKE_SEND_LOG unset}"
+case "$*" in
+  *"#{pane_current_path}"*)
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  send-keys)
+    printf '%s\n' "$*" >> "$sendlog"
+    exit 0
+    ;;
+  capture-pane)
+    marker=$(grep -o 'FM-WT-PROBE-[A-Za-z0-9._-]*' "$sendlog" 2>/dev/null | tail -n 1)
+    if [ -n "$marker" ]; then
+      printf '%s\n' "${FM_FAKE_PROBE_ANSWER:?}"
+      printf '%s\n' "$marker"
+    fi
+    exit 0
+    ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+# A pane whose reported cwd NEVER leaves the project (the Windows nested
+# cmd.exe shape) must still spawn: the settle loop times out, the pane probe
+# asks the pane where it is, and the probe's answer becomes the worktree.
+test_cwd_blind_pane_falls_back_to_probe() {
+  local case_dir home proj wt fakebin id out status
+  id=settle-probe-z3
+  case_dir="$TMP_ROOT/settle-probe"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_probe_fakebin "$case_dir/fake")
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-probe"
+  mkdir -p "$home/data/$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$proj" FM_FAKE_PROBE_ANSWER="$wt" \
+    FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    FM_SPAWN_WT_SETTLE_POLLS=2 FM_SPAWN_WT_PROBE_ATTEMPTS=2 \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed through the pane probe fallback"
+  assert_contains "$out" "spawned $id" "probe-fallback spawn did not report success"
+  assert_grep "worktree=$wt" "$home/state/$id.meta" \
+    "meta did not record the probe-answered worktree"
+  assert_no_grep "worktree=$proj" "$home/state/$id.meta" \
+    "meta wrongly recorded the primary checkout as the worktree"
+  grep -q "FM-WT-PROBE-$id-1" "$case_dir/send.log" \
+    || fail "spawn never sent the worktree probe to the pane"
+  pass "a cwd-blind pane still spawns through the git-rev-parse pane probe"
+}
+
+# A cwd-blind pane whose probe answers with a path that does NOT resolve to a
+# real distinct worktree must fail the spawn rather than silently accepting
+# the primary checkout: the isolation contract survives the fallback.
+test_probe_answer_matching_project_is_refused() {
+  local case_dir home proj wt fakebin id out status
+  id=settle-probe-refuse-z4
+  case_dir="$TMP_ROOT/settle-probe-refuse"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_probe_fakebin "$case_dir/fake")
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-probe-refuse"
+  mkdir -p "$home/data/$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  status=0
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$proj" FM_FAKE_PROBE_ANSWER="$proj" \
+    FM_FAKE_SEND_LOG="$case_dir/send.log" \
+    FM_SPAWN_WT_SETTLE_POLLS=2 FM_SPAWN_WT_PROBE_ATTEMPTS=1 \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "spawn must fail when the probe can only answer the primary checkout"
+  assert_contains "$out" "did not enter a worktree" "refusal did not name the worktree-detection failure"
+  [ ! -f "$home/state/$id.meta" ] \
+    || assert_no_grep "worktree=$proj" "$home/state/$id.meta" \
+      "a failed probe run must never record the primary checkout as a worktree"
+  pass "a probe that can only answer the primary checkout refuses the spawn"
 }
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_cwd_blind_pane_falls_back_to_probe
+test_probe_answer_matching_project_is_refused
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -766,7 +766,37 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   return 1
 }
 
+# Prefer /proc stat field 22 (starttime in boot ticks) plus the full cmdline
+# over the ps lstart rendering: lstart is re-derived from the wall clock on
+# every read, and WSL2's clock drifts across host sleep and then corrects, so
+# the SAME live process can render two different lstart strings and a live
+# sender would be misread as dead (#433 upstream). The boot-tick count never
+# changes for a process's lifetime. Hosts without procfs keep the lstart form.
 fm_pending_reply_pid_identity() {  # <pid>
+  local pid=$1 identity proc_root stat_line starttime cmdline_hex
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    [ -n "$cmdline_hex" ] || return 1
+    printf 'starttime=%s cmdline-hex=%s' "$starttime" "$cmdline_hex"
+    return 0
+  fi
+  identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  printf '%s' "$identity"
+}
+
+# Legacy identity form, kept ONLY so a record written before the boot-tick
+# identity existed still compares against something on its own terms during
+# one upgrade window; never used for new records.
+fm_pending_reply_pid_identity_legacy() {  # <pid>
   local pid=$1 identity
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
@@ -779,7 +809,14 @@ fm_pending_reply_sender_alive() {  # <record-path>
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
   [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
+  case "$expected" in
+    starttime=*)
+      actual=$(fm_pending_reply_pid_identity "$pid") || return 1
+      ;;
+    *)
+      actual=$(fm_pending_reply_pid_identity_legacy "$pid") || return 1
+      ;;
+  esac
   [ "$actual" = "$expected" ]
 }
 
@@ -905,7 +942,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now
+  local open_line open_key open_note now close_line close_rc
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -926,10 +963,18 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       open_note=${open_line#*$'\t'}
       open_note=${open_note#*$'\t'}
       [ "$open_note" = "$note" ] || continue
-      printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s\n' \
+      # This close is the home's own bookkeeping, written by the same resolve
+      # or tick that already consumed the reply, so it uses the guarded
+      # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
+      # wrappers) and does not wake the home that wrote it; the escalation
+      # OPEN above stays a plain append because a new blocker must wake.
+      close_line=$(printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s' \
         "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
-        "$(fm_pending_reply_get "$rec" resolved_via)" \
-        >> "$parent_status" 2>/dev/null || return 1
+        "$(fm_pending_reply_get "$rec" resolved_via)")
+      close_rc=0
+      fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
+        2>/dev/null || close_rc=$?
+      [ "$close_rc" -ne 2 ] || return 1
       break
     done <<EOF
 $(status_open_decisions "$parent_status")

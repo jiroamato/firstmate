@@ -272,18 +272,29 @@ fm_pr_sha256() {
 }
 
 fm_pr_private_file_valid() {
-  local path=$1 mode=$2 device=$3 expected_uid
+  local path=$1 mode=$2 device=$3 expected_uid state_dir
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   case "$(uname -s 2>/dev/null)" in
     MSYS*|MINGW*|CYGWIN*)
-      # Windows Git Bash: these files live under the user's own state dir, which
-      # NTFS ACLs already make user-private, and the emulated POSIX mode on a
-      # noacl mount cannot be forced (chmod 0600 reads back 644). Owner match is
-      # the effective equivalent of the Unix mode requirement there, the same
-      # substitution bin/backends/herdr.sh makes for its 700 lock namespace.
-      expected_uid=$(id -u 2>/dev/null) || return 1
-      [ -n "$expected_uid" ] || return 1
-      [ "$(fm_pr_file_owner "$path")" = "$expected_uid" ] || return 1
+      # Windows Git Bash: a noacl MSYS mount cannot hold POSIX bits (chmod
+      # 0600 reads back 644), so the strict mode requirement would reject
+      # every private file there. But "Windows" alone is not proof of that -
+      # an acl mount enforces modes fine - so let the filesystem answer for
+      # itself: the behavioral probe (bin/fm-state-capability-lib.sh, adopted
+      # from upstream PR #2378) proves by doing whether this state directory
+      # can hold owner-only modes. Where it can, keep the strict mode check
+      # even on Windows; only where it provably cannot, fall back to the
+      # owner match, which NTFS ACLs on the user's own state dir make the
+      # effective equivalent - the same substitution bin/backends/herdr.sh
+      # makes for its 700 lock namespace.
+      state_dir=$(dirname -- "$path")
+      if fm_pr_state_mode_secure "$state_dir"; then
+        [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+      else
+        expected_uid=$(id -u 2>/dev/null) || return 1
+        [ -n "$expected_uid" ] || return 1
+        [ "$(fm_pr_file_owner "$path")" = "$expected_uid" ] || return 1
+      fi
       ;;
     *)
       [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
@@ -291,6 +302,21 @@ fm_pr_private_file_valid() {
   esac
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
+}
+
+# Thin seam over the shared capability probe so tests can exercise both
+# branches from any host, and so a missing library degrades to the probe's
+# own conservative answer (not secure -> owner fallback) instead of erroring.
+fm_pr_state_mode_secure() {
+  local state_dir=$1 lib
+  if ! command -v fm_state_mode_secure >/dev/null 2>&1 \
+    && ! declare -F fm_state_mode_secure >/dev/null 2>&1; then
+    lib="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)/fm-state-capability-lib.sh"
+    # shellcheck source=bin/fm-state-capability-lib.sh
+    [ -r "$lib" ] && . "$lib"
+  fi
+  declare -F fm_state_mode_secure >/dev/null 2>&1 || return 1
+  fm_state_mode_secure "$state_dir"
 }
 
 fm_pr_regular_destination_or_absent() {

@@ -171,6 +171,8 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
+# Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
+# consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -235,6 +237,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$SCRIPT_DIR/fm-path-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -2206,7 +2210,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  settle_polls=${FM_SPAWN_WT_SETTLE_POLLS:-60}
+  case "$settle_polls" in ''|*[!0-9]*) settle_polls=60 ;; esac
+  for _ in $(seq 1 "$settle_polls"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2224,8 +2230,45 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
+  # Fallback: ask the pane itself where it is. On Windows, treehouse get can
+  # run its subshell as a nested cmd.exe, so the backend's structured cwd read
+  # keeps reporting the top-level shell's directory even though the pane really
+  # did enter the worktree - the poll above then never sees the move (#1796
+  # upstream). The pane's own `git rev-parse --show-toplevel` answer does not
+  # depend on what the process tree exposes, so probe with it, delimited by a
+  # per-attempt marker so a stale echo from an earlier attempt can never be
+  # parsed as this attempt's answer. A cmd.exe answer arrives in drive-letter
+  # form with a trailing CR; fm_path_to_posix owns that translation and FAILS
+  # rather than guessing, which keeps the isolation contract: an untranslatable
+  # answer is a spawn error, never a silent fallback to the primary checkout.
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    probe_attempts=${FM_SPAWN_WT_PROBE_ATTEMPTS:-10}
+    case "$probe_attempts" in ''|*[!0-9]*) probe_attempts=10 ;; esac
+    probe_attempt=0
+    while [ -z "$WT" ] && [ "$probe_attempt" -lt "$probe_attempts" ]; do
+      probe_attempt=$((probe_attempt + 1))
+      probe_marker="FM-WT-PROBE-$ID-$probe_attempt"
+      spawn_send_text_line "$WT_TARGET" "git rev-parse --show-toplevel && echo $probe_marker"
+      for _ in 1 2 3 4 5 6; do
+        sleep 1
+        probe_cap=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 40 "$W" 2>/dev/null || true)
+        # The answer is the line immediately before the exact marker line; the
+        # echoed command line never matches exactly because it carries the
+        # leading `git ...` text.
+        probe_answer=$(printf '%s\n' "$probe_cap" | tr -d '\r' \
+          | awk -v m="$probe_marker" '$0 == m { print prev; exit } { prev = $0 }')
+        [ -n "$probe_answer" ] || continue
+        probe_posix=$(fm_path_to_posix "$probe_answer" 2>/dev/null) || continue
+        probe_real=$(real_path_or_raw "$probe_posix")
+        [ -d "$probe_real" ] || continue
+        [ "$probe_real" != "$PROJ_ABS_REAL" ] || continue
+        WT="$probe_posix"
+        break
+      done
+    done
+  fi
+  if [ -z "$WT" ]; then
+    echo "error: treehouse get did not enter a worktree within 60s (cwd poll and pane probe both failed); inspect window $T" >&2
     exit 1
   fi
 
@@ -2344,9 +2387,13 @@ EOF
 // never clear the worker's busy state. The session.idle touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+// The writer runs via bash, not as a direct executable: a native Windows node
+// host cannot exec a shebang .sh file (execFile fails, and the fire-and-forget
+// callback would swallow it silently, leaving busy state permanently stale).
+// bash is on PATH wherever firstmate runs and owns the script's path form.
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    execFile("bash", ["$FM_ROOT/bin/fm-busy-event.sh",
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
@@ -2400,9 +2447,13 @@ EOF
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
+// The writer runs via bash, not as a direct executable: a native Windows node
+// host cannot exec a shebang .sh file (execFile fails, and the fire-and-forget
+// callback would swallow it silently, leaving busy state permanently stale).
+// bash is on PATH wherever firstmate runs and owns the script's path form.
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    execFile("bash", ["$FM_ROOT/bin/fm-busy-event.sh",
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
@@ -2568,10 +2619,11 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_lock_acquire_wait "$SPAWN_META_LOCK" || exit 1
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
@@ -2579,7 +2631,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2598,6 +2650,7 @@ preserve_relaunch_meta() {
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+  echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2703,7 +2756,7 @@ fi
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0
   SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_lock_acquire_wait "$SPAWN_META_LOCK" || return 1
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
