@@ -90,4 +90,33 @@ FM_LOCK_ACQUIRE_TIMEOUT=10 fm_lock_acquire_wait "$STALE" \
 fm_lock_release "$STALE"
 pass "a dead-holder lock is reclaimed within the bound"
 
+# --- wake-queue callers honor the refusal ------------------------------------
+
+# Hold the wake-queue lock with a genuinely live holder. On bounded-wait
+# timeout fm_wake_append must refuse outright - no recovery marker, no seq
+# bump, no queue append - and fm_wake_queued_keys must refuse the unlocked
+# read rather than observe a possibly half-written queue.
+sleep 60 &
+QHOLDER=$!
+mkdir -p "$FM_WAKE_QUEUE_LOCK"
+printf '%s\n' "$QHOLDER" > "$FM_WAKE_QUEUE_LOCK/pid"
+
+if FM_LOCK_ACQUIRE_TIMEOUT=1 fm_wake_append check contended-key "check: contended" 2>/dev/null; then
+  kill "$QHOLDER" 2>/dev/null
+  fail "fm_wake_append must refuse when the wake-queue lock wait times out"
+fi
+[ ! -e "$FM_WAKE_QUEUE" ] || fail "a refused append must not touch the wake queue"
+[ ! -e "$STATE/.wake-queue.seq" ] || fail "a refused append must not bump the wake-queue seq"
+[ ! -e "$STATE/.watcher-down" ] || fail "a refused append must not publish the recovery marker"
+pass "fm_wake_append refuses a timed-out lock wait without touching the queue"
+
+if FM_LOCK_ACQUIRE_TIMEOUT=1 fm_wake_queued_keys check 2>/dev/null; then
+  kill "$QHOLDER" 2>/dev/null
+  fail "fm_wake_queued_keys must refuse when the wake-queue lock wait times out"
+fi
+pass "fm_wake_queued_keys refuses the unlocked read on a timed-out lock wait"
+
+kill "$QHOLDER" 2>/dev/null; wait "$QHOLDER" 2>/dev/null || true
+rm -rf "$FM_WAKE_QUEUE_LOCK"
+
 echo "fm-lock-bounded-wait: all tests passed"
