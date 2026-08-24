@@ -1,0 +1,32 @@
+== Focused unit test: tests/fm-daemon.test.sh :: test_hash_text_survives_md5_data_file_on_path ==
+$ bash tests/.tmp-md5-only.sh   # driver sourcing the suite prefix, running only the new test
+ok - _hash_text still hashes when md5 on PATH is a data file
+EXIT=0 (real 1m44s on this MSYS host)
+
+== Before/after demo: functions extracted from git base/target, run under a PATH where `md5` is an R checksum manifest and md5sum is absent ==
+== BASE (e223b8a) bin/fm-supervise-daemon.sh _hash_text, poisoned PATH ==
+base _hash_text
+  exit=127
+  output: /tmp/md5-poison-demo.bGrHJS/md5: line 1: d41d8cd98f00b204e9800998ecf8427e: command not found
+/tmp/md5-poison-demo.bGrHJS/md5: line 2: d41d8cd98f00b204e9800998ecf8427e: command not found
+
+== TARGET (740f99f) bin/fm-supervise-daemon.sh _hash_text, poisoned PATH ==
+fixed _hash_text
+  exit=0
+  output: 483374233
+
+== TARGET tests/wake-helpers.sh hash_text, poisoned PATH ==
+fixed hash_text
+  exit=0
+  output: 483374233
+
+== TARGET bin/fm-watch.sh hash_pane (stdin), poisoned PATH ==
+fixed hash_pane
+  exit=0
+  output: 2516102916
+
+== SANITY: real PATH (md5sum present) - fixed _hash_text uses real md5 ==
+  exit=0
+  output:   700c7c01d799d7065f77a4dff917cb20
+  expected: 700c7c01d799d7065f77a4dff917cb20
+  match=yes
