@@ -1,0 +1,21 @@
+Red/green proof for test_check_coverage_is_locale_independent
+(tests/fm-test-run.test.sh, pure-contract-unit family)
+
+Method: a temp driver sourced tests/lib.sh, extracted only the new test
+function, and ran it twice - first with the pre-fix bin/fm-test-run.sh
+(git checkout e223b8a -- bin/fm-test-run.sh), then with the fixed runner
+restored (git checkout 7cca65f -- bin/fm-test-run.sh). Worktree verified
+clean afterwards (git status --porcelain empty).
+
+=== RED: regression test against pre-fix runner (e223b8a) ===
+not ok - --check-coverage exited 1 under LC_ALL=en_US.UTF-8: comm: file 2 is not in sorted order
+comm: input is not in sorted order
+red_exit=1
+
+=== GREEN: regression test against fixed runner (7cca65f) ===
+ok - coverage guard survives a UTF-8 locale (verified under LC_ALL=en_US.UTF-8)
+green_exit=0
+
+Family placement check:
+  $ bash bin/fm-test-run.sh --list --family pure-contract-unit | grep fm-test-run.test.sh
+  tests/fm-test-run.test.sh

@@ -1,0 +1,22 @@
+Coverage guard locale fix - end-to-end CLI transcript
+Host: Windows 11 / MSYS bash, worktree at fm/coverage-guard-locale (7cca65f)
+
+Precondition - this host reproduces the collation divergence the bug depends on:
+
+  $ printf 'fm-backend-cmux.test.sh\nfm-backend.test.sh\n' | LC_ALL=C sort
+  fm-backend-cmux.test.sh
+  fm-backend.test.sh
+
+  $ printf 'fm-backend-cmux.test.sh\nfm-backend.test.sh\n' | LC_ALL=en_US.UTF-8 sort
+  fm-backend.test.sh
+  fm-backend-cmux.test.sh
+
+Fixed code (7cca65f) - the guard now exits 0 under both collations with identical output:
+
+  $ LC_ALL=C bash bin/fm-test-run.sh --check-coverage
+  FM_TEST_COVERAGE ok total=147 parallel=24 serial=111 serial_shards=4 herdr=12
+  exit=0
+
+  $ LC_ALL=en_US.UTF-8 bash bin/fm-test-run.sh --check-coverage
+  FM_TEST_COVERAGE ok total=147 parallel=24 serial=111 serial_shards=4 herdr=12
+  exit=0
