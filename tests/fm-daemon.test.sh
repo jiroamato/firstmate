@@ -118,29 +118,35 @@ EOF
   printf '%s' "$dir"
 }
 
+# with_sandbox_path <dir> <cmd> [args...]: run one command with PATH narrowed to
+# the sandbox. The narrowing must not outlive the call: `fail` exits, and the
+# cleanup traps in tests/lib.sh then reach for real external tools such as rm,
+# so the sandbox PATH may only be in scope while the probed command itself runs.
+# `local` restores the caller's PATH the moment this helper returns.
+with_sandbox_path() {
+  local PATH=$1
+  shift
+  "$@"
+}
+
 test_hash_text_survives_md5_data_file_on_path() {
   local dir out status first second other
   dir=$(md5_poisoned_path "$TMP_ROOT/hash-text-md5-poisoned")
 
-  # Narrow PATH to the sandbox for the rest of this case. `local` restores the
-  # caller's PATH on return, and every helper called below is a shell builtin or
-  # a sourced function, so nothing here needs the real PATH back.
-  local PATH="$dir"
-
   # Guard the case against going vacuous: the sandbox must really resolve the
   # fake md5 and really lack md5sum, or the probed branch is never reached.
-  command -v md5 >/dev/null 2>&1 || fail "sandbox PATH does not resolve the fake md5 data file"
-  ! command -v md5sum >/dev/null 2>&1 || fail "sandbox PATH still resolves a real md5sum"
+  with_sandbox_path "$dir" command -v md5 >/dev/null 2>&1 || fail "sandbox PATH does not resolve the fake md5 data file"
+  ! with_sandbox_path "$dir" command -v md5sum >/dev/null 2>&1 || fail "sandbox PATH still resolves a real md5sum"
 
-  out=$(_hash_text 'wake-identity' 2>&1); status=$?
+  out=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>&1); status=$?
 
   expect_code 0 "$status" "_hash_text must succeed when md5 on PATH is a data file"
   assert_not_contains "$out" "command not found" "_hash_text executed the md5 data file instead of probing it"
   [ -n "$out" ] || fail "_hash_text returned no hash when md5 on PATH is a data file"
 
-  first=$(_hash_text 'wake-identity' 2>/dev/null)
-  second=$(_hash_text 'wake-identity' 2>/dev/null)
-  other=$(_hash_text 'other-identity' 2>/dev/null)
+  first=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>/dev/null)
+  second=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>/dev/null)
+  other=$(with_sandbox_path "$dir" _hash_text 'other-identity' 2>/dev/null)
   [ "$first" = "$second" ] || fail "_hash_text is not deterministic under the cksum backstop"
   [ "$first" != "$other" ] || fail "_hash_text collapsed distinct inputs onto one hash under the cksum backstop"
 
