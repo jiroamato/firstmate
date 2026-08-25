@@ -1,0 +1,11 @@
+--- state/arm-ran ---
+arm-run=1 pid=802286
+arm-run=2 pid=803188
+arm-run=3 pid=803963
+arm-run=4 pid=804085
+--- state/.claude-autoarm-epoch ---
+epoch=6 owner_pid=803438 outcome=clean updated_at=1787620044
+--- state/.lock (seeded as 9999999 dead owner) ---
+17640
+--- state/task.meta ---
+(removed by 3rd arm run - in-flight need drained, as designed)
