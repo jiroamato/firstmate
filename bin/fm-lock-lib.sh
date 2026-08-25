@@ -176,10 +176,22 @@ fm_lock_windows_pids_with_cwd_under() {  # <dir>
       case "$PWD" in
         "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
       esac
-    elif [ -d "$entry" ]; then
-      # Still listed but its cwd would not resolve - a real gap in the answer,
-      # unlike a process that simply exited between the glob and this read.
-      incomplete=1
+    elif [ -d "$entry" ] && kill -0 "$pid" 2>/dev/null; then
+      # Still listed, still alive, but its cwd would not resolve. An exiting
+      # MSYS process sits in exactly this state for a beat (its cwd stops
+      # resolving before its /proc entry disappears), and counting that race
+      # as a gap made every busy-host scan randomly incomplete. Grant one
+      # short grace, then count only a still-alive, still-unresolvable entry
+      # as a real gap in the answer - unlike a process that simply exited
+      # between the glob and this read, which is no gap at all.
+      sleep 0.2
+      if cd -P "$entry/cwd" 2>/dev/null; then
+        case "$PWD" in
+          "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
+        esac
+      elif [ -d "$entry" ] && kill -0 "$pid" 2>/dev/null; then
+        incomplete=1
+      fi
     fi
   done
   cd -P "$origin" 2>/dev/null || rc=1
