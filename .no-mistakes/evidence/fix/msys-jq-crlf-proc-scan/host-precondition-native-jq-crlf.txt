@@ -1,0 +1,12 @@
+# Host precondition: the only jq is the native winget build and it emits CRLF
+$ command -v jq; jq --version
+/c/Users/amato/AppData/Local/Microsoft/WinGet/Packages/jqlang.jq_Microsoft.Winget.Source_8wekyb3d8bbwe/jq
+jq-1.8.2
+$ printf '["a","b"]' | jq -r '.[]' | od -c
+0000000   a  \r  \n   b  \r  \n
+0000006
+
+# Host has no python3, only python (why make_herdr_fakebin gained the shim)
+$ command -v python3 || echo no python3 on PATH; command -v python
+no python3 on PATH
+/c/Users/amato/miniforge3/python

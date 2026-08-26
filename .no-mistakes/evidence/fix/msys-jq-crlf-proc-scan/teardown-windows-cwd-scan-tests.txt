@@ -1,0 +1,9 @@
+# fm-teardown windows cwd-scan tests (run via a transient driver that invokes only
+# these three test functions from tests/fm-teardown.test.sh):
+#   test_windows_cwd_scan_reaps_leaked_worktree_process
+#   test_windows_cwd_scan_error_refuses_before_removal   (fixture now uses a LIVE gap pid)
+#   test_non_windows_uname_never_uses_the_native_cwd_scan
+ok - with no lsof, the native cwd scan finds and reaps a leaked worktree process
+ok - a native cwd scan that cannot resolve a listed process refuses teardown and preserves the task
+ok - a non-Windows uname never reaches the native cwd scan, missing lsof or not
+EXIT=0

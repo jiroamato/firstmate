@@ -1,0 +1,14 @@
+# New regression test tests/fm-lock-cwd-scan.test.sh run against the BASE tree (81c3fde):
+# fails exactly at the exit-race behavior the fix introduces (red before fix).
+$ bash <base-tree>/tests/fm-lock-cwd-scan.test.sh
+ok - cwd scan reports the pid rooted under the target directory
+not ok - a lingering /proc entry for an already-dead pid must not fail the scan
+exit=1
+
+# Same test against the FIXED worktree (1daf39b): green.
+$ bash tests/fm-lock-cwd-scan.test.sh
+ok - cwd scan reports the pid rooted under the target directory
+ok - cwd scan skips a lingering /proc entry whose process is already dead
+ok - cwd scan fails closed on a live process whose cwd cannot be resolved
+ok - cwd scan fails closed when kill -0 fails for a reason other than ESRCH
+exit=0

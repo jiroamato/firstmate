@@ -1,0 +1,23 @@
+# Full tests/fm-backend-herdr.test.sh run on the Windows host whose only jq is the
+# native winget build (CRLF emitter) and which has no python3 on PATH - the exact
+# environment the intent says was failing before this change.
+passing tests: 171
+failures: 0
+EXIT=0
+
+# last 15 results:
+ok - fm_backend_herdr_escalation_marker keys the dedupe marker exactly like the watcher's .stale-<key>
+ok - fm_backend_herdr_apply_transition: blocked dedupe starts only after explicit commit
+ok - fm_backend_herdr_apply_transition: a working edge clears the marker so the next ->blocked re-escalates
+ok - fm_backend_herdr_clear_transition removes task-owned dedupe state
+ok - fm_backend_herdr_apply_transition: idle/done (defer) and unknown/empty (fallback) take no fast action
+ok - fm_backend_herdr_wait_transition: a home with no herdr panes falls back to polling (rc 2)
+ok - fm_backend_herdr_wait_transition: below-capability protocol/schema falls back to polling (rc 2)
+ok - fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane
+ok - fm_backend_herdr_wait_transition: subscribes before reconnect level-reconcile
+ok - fm_backend_herdr_wait_transition: a still-blocked, already-escalated pane is not re-delivered on reconnect
+ok - fm_backend_herdr_wait_transition: a streamed ->blocked edge returns the record sub-poll
+ok - fm_backend_herdr_wait_transition: streamed working clears the marker, idle/done are deferred (clean timeout)
+ok - fm_backend_herdr_wait_transition: a reader/subscribe failure falls back to polling (rc 2)
+ok - fm_backend_herdr_wait_transition: Bash 3.2-safe bad-ack path closes fd 9 and removes its FIFO
+ok - fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1

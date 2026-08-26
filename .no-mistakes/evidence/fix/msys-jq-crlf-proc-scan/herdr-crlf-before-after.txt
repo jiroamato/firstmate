@@ -1,0 +1,24 @@
+# fm_backend_herdr_workspace_find_all with the REAL native winget jq (CRLF emitter)
+# against a fake `herdr workspace list` returning two "firstmate" workspaces (w1, w2).
+
+----- BASE (81c3fde): first id keeps a carriage return -----
+== jq: /c/Users/amato/AppData/Local/Microsoft/WinGet/Packages/jqlang.jq_Microsoft.Winget.Source_8wekyb3d8bbwe/jq jq-1.8.2 ==
+captured ids (od -c):
+0000000   w   1  \r  \n   w   2
+0000006
+RESULT: first id is NOT clean 'w1' (got $'w1\r')
+
+----- FIXED (1daf39b): ids are clean -----
+== jq: /c/Users/amato/AppData/Local/Microsoft/WinGet/Packages/jqlang.jq_Microsoft.Winget.Source_8wekyb3d8bbwe/jq jq-1.8.2 ==
+captured ids (od -c):
+0000000   w   1  \n   w   2
+0000005
+RESULT: first id is clean 'w1'
+
+# Deliberate semantics preserved (required by intent): jq exit status and empty-output shape
+----- BASE -----
+malformed: rc=5 out_bytes=0
+nomatch: rc=0 out_bytes=0
+----- FIXED -----
+malformed: rc=5 out_bytes=0
+nomatch: rc=0 out_bytes=0
