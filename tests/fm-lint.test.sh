@@ -12,6 +12,9 @@
 # ShellCheck floated with the runner image and still emitted SC2015, which
 # ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
 # gates resolve it, so command, file set, config, AND version all match.
+# Two Windows-only ways that same gate later stopped running are guarded at the
+# end of this file: the pinned command must name an interpreter cmd.exe can
+# exec, and `.gitattributes` must pin the lint targets to LF.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -619,6 +622,65 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# --- gate invocability guards -----------------------------------------------
+#
+# The two ways the pinned gate command has silently stopped running the owner
+# on Windows, both fixed at their root and locked here:
+#   1. no-mistakes hands commands.lint to a platform shell. On Windows that is
+#      cmd.exe, which cannot exec a POSIX script path, so a bare
+#      `bin/fm-lint.sh` died with "'bin' is not recognized as an internal or
+#      external command" and every run had to skip Lint.
+#   2. Under core.autocrlf=true a Windows checkout produced CRLF sources, and
+#      ShellCheck 0.11.0 reports SC1017 on every line of them, so the gate
+#      failed on file endings rather than on the code.
+
+# The pinned command string, read from the tracked config no-mistakes reads.
+fm_lint_gate_command() {
+  sed -n "s/^[[:space:]]*lint:[[:space:]]*'\(.*\)'[[:space:]]*$/\1/p" \
+    "$ROOT/.no-mistakes.yaml"
+}
+
+test_gate_pins_the_owner_behind_an_interpreter() {
+  local command first
+  command=$(fm_lint_gate_command)
+  [ -n "$command" ] \
+    || fail ".no-mistakes.yaml sets no commands.lint; the gate would not run the lint owner"
+  case "$command" in
+    *bin/fm-lint.sh*) : ;;
+    *) fail "commands.lint must invoke bin/fm-lint.sh, the single lint owner; got '$command'" ;;
+  esac
+  first=${command%% *}
+  # cmd.exe execs the first token itself, so it must be an interpreter on PATH
+  # and never the script path. `bash` matches the owner's own
+  # `#!/usr/bin/env bash` shebang, so one string stays correct on every platform.
+  [ "$first" = bash ] \
+    || fail "commands.lint must name an interpreter first so cmd.exe can exec it; got '$first'"
+  pass "the no-mistakes gate pins bin/fm-lint.sh behind bash, so cmd.exe can exec it"
+}
+
+test_shell_sources_are_pinned_to_lf() {
+  local file targets unpinned
+  local -a files
+  files=()
+  targets=$(CI=true "$LINT" --list-files)
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    files+=("$file")
+  done <<EOF
+$targets
+EOF
+  [ "${#files[@]}" -gt 0 ] || fail "fm-lint.sh listed no lint targets to check for LF"
+  # One batched attribute query: the canonical set is a few hundred files and a
+  # per-file `git check-attr` spawn is minutes of process overhead on Windows.
+  # Only the pin is asserted here; whether a given checkout actually holds LF is
+  # what ShellCheck itself reports, as SC1017, when fm-lint.sh runs.
+  unpinned=$(printf '%s\n' "${files[@]}" \
+    | git -C "$ROOT" check-attr eol --stdin | grep -v ': eol: lf$') || unpinned=
+  [ -z "$unpinned" ] \
+    || fail ".gitattributes must pin every lint target to LF; unpinned: $(printf '%s' "$unpinned" | tr '\n' ' ')"
+  pass "every lint target is pinned to LF, so no checkout can fail the gate on SC1017"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
@@ -635,3 +697,5 @@ test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
+test_gate_pins_the_owner_behind_an_interpreter
+test_shell_sources_are_pinned_to_lf
