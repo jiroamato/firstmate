@@ -1,0 +1,6 @@
+herdr 0.8.0-preview.2026-08-04-d78e3d3b5126
+lab session: fm-lab-fm-retreat-verif-516173-17974
+doomed workspace=w3 tab=w3:t1 pane=w3:p1
+default-mode stderr: warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus
+ok - real herdr: default mode refuses the focused doomed tab and the pane survives
+ok - real herdr: retreat mode closes the focused doomed tab (launcherless plain-close fallback)

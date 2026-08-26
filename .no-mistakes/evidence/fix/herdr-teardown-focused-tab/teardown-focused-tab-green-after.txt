@@ -1,0 +1,4 @@
+# Green: teardown-level regression test (reported scenario) on commit f3aea28
+# fm-teardown of a crewmate whose herdr tab is the captain's ACTIVE tab
+ok - herdr projection teardown closes the crewmate tab even when it is the active tab
+exit=0

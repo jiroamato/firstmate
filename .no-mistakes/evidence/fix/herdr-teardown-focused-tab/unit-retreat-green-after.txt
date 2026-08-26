@@ -1,0 +1,5 @@
+# Green: new retreat unit tests on the fixed adapter (commit f3aea28)
+$ bash tests/fm-backend-herdr.test.sh (trimmed to the two new tests)
+ok - herdr presentation focus: retreat mode lands on the launcher tab, then closes the active target
+ok - herdr presentation focus: retreat mode without a launcher falls back to the plain close
+exit=0

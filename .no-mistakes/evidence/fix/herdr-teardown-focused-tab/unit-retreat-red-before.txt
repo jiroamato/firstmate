@@ -1,0 +1,3 @@
+# Red: same two new unit tests against the pre-fix adapter (parent commit 98caf07)
+not ok - retreat-mode close of the active target should succeed after landing on the launcher tab: warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus
+exit=1
