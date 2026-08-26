@@ -457,21 +457,11 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
-test_main_direct_terminal_presentation_receipt
-test_local_secondmate_reports_terminal_child
-test_local_secondmate_rejects_relative_parent_home
-test_invalid_secondmate_marker_blocks_routing
-test_remote_parent_reply_is_idempotent
-test_reused_task_id_reports_each_incarnation
-test_legacy_metadata_rewrite_keeps_receipt_identity
-test_relaunch_cannot_replace_metadata_during_state_snapshot
-test_heartbeat_cap_does_not_delay_reconciliation
-test_scan_marker_replaces_symlink_safely
-test_nonterminal_and_captain_held_states_do_not_report
-test_watcher_hook_and_idle_secondmate_exemption
+fail() { printf 'not ok - %s\n' "$1"; FAILED=1; }
+date '+start %T'
 test_stalled_state_read_is_bounded_and_scan_progresses
-test_full_scan_budget_includes_wake_lock_wait
-test_notice_recovery_does_not_duplicate_wake
-test_reconciliation_never_calls_forge
-
-echo "all inactive reconciliation tests passed"
+date '+end %T'
+echo "--- marker ---"; cat "$MAIN/state/.inactive-outcome-reconcile" 2>/dev/null
+echo "--- wake queue ---"; cat "$MAIN/state/.wake-queue" 2>/dev/null
+echo "--- state dir ---"; ls "$MAIN/state" 2>/dev/null
+exit "${FAILED:-0}"
