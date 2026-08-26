@@ -9,7 +9,10 @@
 #      every teardown on a busy host randomly refuse with
 #      "cannot determine leaked processes";
 #   3. still fail closed on a LIVE process whose cwd cannot be resolved - a
-#      real gap in the answer, never silently dropped.
+#      real gap in the answer, never silently dropped;
+#   4. treat only an ESRCH answer from kill -0 as proof of death - EPERM or
+#      any unrecognized failure may be a live process the walker cannot
+#      signal, and must stay a fail-closed gap.
 # The fixtures fake /proc via FM_PROC_ROOT_OVERRIDE; the function itself is
 # plain bash and testable on every platform.
 set -u
@@ -57,5 +60,29 @@ if out=$(FM_PROC_ROOT_OVERRIDE="$PROC3" fm_lock_windows_pids_with_cwd_under "$TA
 fi
 kill "$LIVE_PID" 2>/dev/null; wait "$LIVE_PID" 2>/dev/null || true
 pass "cwd scan fails closed on a live process whose cwd cannot be resolved"
+
+# --- 4. a non-ESRCH kill -0 failure stays a fail-closed gap ------------------
+# A real EPERM needs a process owned by another user, which this suite cannot
+# create without root. Shadow the kill builtin for one fake pid to answer the
+# way an unsignalable live process does; every other pid falls through to the
+# real builtin. The scan runs in a command substitution subshell of this
+# shell, so the shadow is visible to it.
+EPERM_PID=4181113
+PROC4="$WORLD/proc4"
+mkdir -p "$PROC4/self" "$PROC4/4181111" "$PROC4/$EPERM_PID"
+ln -s "$TARGET/sub" "$PROC4/4181111/cwd"
+kill() {
+  if [ "${1-}" = -0 ] && [ "${2-}" = "$EPERM_PID" ]; then
+    echo "kill: ($EPERM_PID) - Operation not permitted" >&2
+    return 1
+  fi
+  builtin kill "$@"
+}
+if out=$(FM_PROC_ROOT_OVERRIDE="$PROC4" fm_lock_windows_pids_with_cwd_under "$TARGET"); then
+  unset -f kill
+  fail "a kill -0 failure other than ESRCH must keep the scan failing closed"
+fi
+unset -f kill
+pass "cwd scan fails closed when kill -0 fails for a reason other than ESRCH"
 
 exit 0

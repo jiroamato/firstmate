@@ -142,6 +142,22 @@ fm_lock_windows_file_holder() {  # <file>
   return 2
 }
 
+# fm_lock_windows_pid_liveness <pid>: 0 kill -0 reaches a live process, 1 the
+# kernel answered ESRCH - the one failure that proves the pid exited, 2 any
+# other failure (EPERM, an unrecognized message). A 2 may still be a live
+# process the walker cannot signal, so callers must treat it as uncertainty,
+# never as death.
+fm_lock_windows_pid_liveness() {  # <pid>
+  local err
+  if err=$(LC_ALL=C kill -0 "$1" 2>&1); then
+    return 0
+  fi
+  case "$err" in
+    *'No such process'*) return 1 ;;
+  esac
+  return 2
+}
+
 # fm_lock_windows_pids_with_cwd_under <dir>: print the MSYS pid of every OTHER
 # process whose current working directory is <dir> or under it, one per line.
 # Returns non-zero when the table itself could not be walked or a still-listed
@@ -156,7 +172,7 @@ fm_lock_windows_file_holder() {  # <file>
 # substitution, which already forks, and that fork is what $BASHPID names below
 # so the walk cannot report the process doing the walking.
 fm_lock_windows_pids_with_cwd_under() {  # <dir>
-  local dir=$1 proc_root entry pid origin rc=0 incomplete=0
+  local dir=$1 proc_root entry pid origin rc=0 incomplete=0 alive
   local CDPATH=''
   [ -n "$dir" ] || return 1
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -176,20 +192,27 @@ fm_lock_windows_pids_with_cwd_under() {  # <dir>
       case "$PWD" in
         "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
       esac
-    elif [ -d "$entry" ] && kill -0 "$pid" 2>/dev/null; then
-      # Still listed, still alive, but its cwd would not resolve. An exiting
-      # MSYS process sits in exactly this state for a beat (its cwd stops
-      # resolving before its /proc entry disappears), and counting that race
-      # as a gap made every busy-host scan randomly incomplete. Grant one
-      # short grace, then count only a still-alive, still-unresolvable entry
-      # as a real gap in the answer - unlike a process that simply exited
-      # between the glob and this read, which is no gap at all.
-      sleep 0.2
-      if cd -P "$entry/cwd" 2>/dev/null; then
-        case "$PWD" in
-          "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
-        esac
-      elif [ -d "$entry" ] && kill -0 "$pid" 2>/dev/null; then
+    elif [ -d "$entry" ]; then
+      # Still listed, but its cwd would not resolve. An exiting MSYS process
+      # sits in exactly this state for a beat (its cwd stops resolving before
+      # its /proc entry disappears), and counting that race as a gap made
+      # every busy-host scan randomly incomplete. Only an ESRCH answer from
+      # kill -0 proves that exit race and is skipped; a live process gets one
+      # short grace and then counts as a real gap, and any other kill -0
+      # failure (EPERM, unrecognized) may be a live process the walker cannot
+      # signal, so it fails closed exactly like the live case.
+      alive=0; fm_lock_windows_pid_liveness "$pid" || alive=$?
+      if [ "$alive" -eq 0 ]; then
+        sleep 0.2
+        if cd -P "$entry/cwd" 2>/dev/null; then
+          case "$PWD" in
+            "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
+          esac
+        elif [ -d "$entry" ]; then
+          alive=0; fm_lock_windows_pid_liveness "$pid" || alive=$?
+          [ "$alive" -eq 1 ] || incomplete=1
+        fi
+      elif [ "$alive" -eq 2 ]; then
         incomplete=1
       fi
     fi
