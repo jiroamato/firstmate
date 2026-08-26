@@ -15,6 +15,12 @@
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks).
 #
+#   fm_timeout_spawn_scale
+#       Prints the positive integer a caller must multiply a DEFAULT bound by on
+#       this host when the bounded work is dominated by process spawns rather
+#       than by the work itself. Set FM_TIMEOUT_SPAWN_SCALE to a positive
+#       integer to override the host answer. The host is read from $OSTYPE.
+#
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
 #
@@ -39,6 +45,39 @@ fm_timeout_mechanism() {
   else
     printf 'bash\n'
   fi
+}
+
+# A bound over a short shell pipeline is really a bound on process spawns: the
+# runner, the shells it wraps the command in, and the handful of coreutils and
+# jq passes the pipeline itself forks. A POSIX host spawns in about a
+# millisecond, so a couple of seconds is already orders of magnitude more than
+# such a read can need. A Windows Git Bash (MSYS) spawn costs a hundred
+# milliseconds to a second on a host with real-time AV in the exec path, which
+# puts the same pipeline tens of seconds out and makes every healthy read look
+# wedged - see docs/verification/windows-snapshot-read-bounds.md for the
+# measurements. Scaling the default keeps the bound meaning one thing on every
+# host: far longer than a healthy read, still finite, so a wedged reader is
+# always cut loose. Only DEFAULTS are scaled; a caller that names a bound gets
+# exactly that bound, which is what keeps the wedged-read tests honest.
+FM_TIMEOUT_SPAWN_SCALE_MSYS=20
+
+# The host is read from $OSTYPE rather than `uname -s`, which is what the rest
+# of this repo asks when it wants the path host. Two reasons, both specific to
+# what this answer is for. Bash sets OSTYPE at build time, so reading it costs no
+# spawn - and a spawn is the exact thing this function exists to price. And it
+# cannot be answered by a stub on PATH: fixtures shim `uname` to drive unrelated
+# platform branches (tests/fm-bearings-snapshot.test.sh pins the GNU-vs-BSD stat
+# split that way), and a shimmed uname silently handing back a 1x scale would put
+# the bounds back under a real read on this host.
+fm_timeout_spawn_scale() {
+  case "${FM_TIMEOUT_SPAWN_SCALE:-}" in
+    ''|*[!0-9]*|0) ;;
+    *) printf '%s\n' "$FM_TIMEOUT_SPAWN_SCALE"; return 0 ;;
+  esac
+  case "${OSTYPE:-}" in
+    msys*|cygwin*|win32) printf '%s\n' "$FM_TIMEOUT_SPAWN_SCALE_MSYS" ;;
+    *) printf '1\n' ;;
+  esac
 }
 
 fm_run_bash_timeout() {

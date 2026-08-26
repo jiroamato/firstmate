@@ -28,7 +28,9 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+# Outlasts any host-scaled bound so the wedge is the bound firing, never the
+# stub finishing; the bound kills the process group, so nothing lingers.
+[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 600
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -184,6 +186,29 @@ EOF
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+# The snapshot scales its DEFAULT bounds by host and honors an explicitly set
+# bound verbatim, so a fixture naming its own bound has to scale the same unit.
+# A flat "1" is tight relative to a healthy read on a POSIX host and tighter
+# than every read on a host where a spawn costs ~1s.
+spawn_scale() {
+  bash -c '. "$1"; fm_timeout_spawn_scale' _ "$ROOT/bin/fm-timeout-lib.sh"
+}
+
+# Windows Git Bash mounts the temp dir noacl: chmod is accepted and then
+# silently ignored, so a fixture that drops read permission still reads fine.
+# Fixtures that need genuine unreadability probe this once and take a portable
+# route where the bits do not stick. See
+# docs/verification/windows-snapshot-read-bounds.md.
+posix_modes_stick() {
+  local probe="$TMP_ROOT/.mode-probe" mode
+  printf 'probe\n' > "$probe" 2>/dev/null || return 1
+  chmod 000 "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
+  mode=$(stat -c '%a' "$probe" 2>/dev/null || stat -f '%Lp' "$probe" 2>/dev/null || true)
+  chmod 600 "$probe" 2>/dev/null || true
+  rm -f "$probe" 2>/dev/null || true
+  case "$mode" in 0|000) return 0 ;; *) return 1 ;; esac
 }
 
 # End-to-end Domain Alpha regression fixture.
@@ -457,7 +482,16 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" invalid "$invalid" "old invalid work"
 
   make_valid_secondmate_home unreadable "$unreadable"
-  chmod 000 "$unreadable/data"
+  # Both routes land in validate_operational_dirs and surface as "invalid home:
+  # ...", which is what this case is about; only the first needs the filesystem
+  # to enforce permission bits, so it is the one that gets skipped where they do
+  # not stick rather than silently leaving the home perfectly readable.
+  if posix_modes_stick; then
+    chmod 000 "$unreadable/data"
+  else
+    rm -rf "$unreadable/data"
+    printf 'not a directory\n' > "$unreadable/data"
+  fi
   append_secondmate_registry "$home" unreadable "$unreadable"
   write_parent_secondmate_event "$home" unreadable "$unreadable" "old unreadable work"
 
@@ -478,8 +512,13 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
 
   fakebin=$(make_fakebin "$home")
-  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json)
-  chmod 700 "$unreadable/data"
+  # The bound has to sit above a healthy home summary and below the wedged one,
+  # and only the first of those is host-dependent: the malformed home must be
+  # read to completion so it can report its unstructured row, while the timedout
+  # home is wedged on a no-mistakes stub that outlasts any scaled bound.
+  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=$((2 * $(spawn_scale))) \
+    run "$home" "$fakebin" --json)
+  [ -d "$unreadable/data" ] && chmod 700 "$unreadable/data" || true
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .state == "unknown")
@@ -772,7 +811,7 @@ EOF
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {
-  local home fakebin json canonical id mate boundary
+  local home fakebin json canonical id mate boundary real_stat
   home=$(make_home registry-unavailable)
   mate="$TMP_ROOT/registry-hidden"
   make_valid_secondmate_home hidden "$mate"
@@ -780,6 +819,20 @@ test_registry_unavailability_and_bounds_are_explicit() {
   fm_write_secondmate_meta "$home/state/hidden.meta" "$mate" "firstmate:fm-hidden" sample
   chmod 000 "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")
+  # The snapshot gates this read on the mode, so where the bits do not stick the
+  # fixture has to answer the same probe the snapshot consults. Delegates for
+  # every other path, which the parent-activity read depends on.
+  if ! posix_modes_stick; then
+    real_stat=$(command -v stat) || fail "no stat on PATH to delegate to"
+    cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *secondmates.md*) [ "\$1" = -c ] && printf '000\n' && exit 0 ;;
+esac
+exec "$real_stat" "\$@"
+SH
+    chmod +x "$fakebin/stat"
+  fi
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   json=$(run "$home" "$fakebin" --json)
@@ -852,6 +905,58 @@ test_registry_unavailability_and_bounds_are_explicit() {
           and (.current.reason | contains("registration is unknown")))
   ' >/dev/null || fail "truncated registry produced false unregistered provenance: $canonical"
   pass "registry unavailability and bounded truncation remain explicit"
+}
+
+# The bounded reads take their default timeout from the host, because what they
+# really spend is process-spawn cost and that differs by orders of magnitude
+# between a POSIX host and Windows Git Bash. Scaling is only worth anything if
+# the bound still cuts a wedged reader loose, so wedge the registry reader at
+# its own `head` and prove the snapshot still answers with the read disclosed as
+# timed out. Deliberately no elapsed-seconds assertion: on a host where a
+# healthy read costs tens of seconds a clock bound proves nothing and flakes.
+test_scaled_read_bounds_still_release_a_wedged_reader() {
+  local home fakebin real_head scale json
+  scale=$(FM_TIMEOUT_SPAWN_SCALE=7 bash -c '. "$1"; fm_timeout_spawn_scale' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$scale" = 7 ] || fail "explicit FM_TIMEOUT_SPAWN_SCALE was not honored: $scale"
+  scale=$(bash -c '. "$1"; fm_timeout_spawn_scale' _ "$ROOT/bin/fm-timeout-lib.sh")
+  case "$scale" in
+    ''|*[!0-9]*|0) fail "host spawn scale is not a positive integer: $scale" ;;
+  esac
+
+  home=$(make_home wedged-registry-read)
+  fakebin=$(make_fakebin "$home")
+  # Fixtures shim uname to drive unrelated platform branches, so the scale must
+  # not be readable from PATH: a shimmed uname handing back 1x would quietly put
+  # every bound back under a real read on a slow host.
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+  chmod +x "$fakebin/uname"
+  [ "$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_timeout_spawn_scale' _ "$ROOT/bin/fm-timeout-lib.sh")" = "$scale" ] ||
+    fail "a uname stub on PATH moved the host spawn scale"
+  real_head=$(command -v head) || fail "no head on PATH to delegate to"
+  # Wedge only the registry reader: every other head call still behaves, so a
+  # failure here can only mean the registry bound did not fire. The sleep has to
+  # outlast the largest scaled default (2 * the host scale), and the process
+  # group the bound kills takes it down with the reader.
+  cat > "$fakebin/head" <<SH
+#!/usr/bin/env bash
+case "\$*" in *secondmates.md*) sleep 900 ;; esac
+exec "$real_head" "\$@"
+SH
+  chmod +x "$fakebin/head"
+  printf -- '- wedged - fixture (home: %s; scope: fixture; projects: sample; added 2026-07-11)\n' \
+    "$TMP_ROOT/wedged-mate" > "$home/data/secondmates.md"
+  json=$(run "$home" "$fakebin" --json) ||
+    fail "snapshot did not survive a wedged registry read"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "(registry)"
+      and .freshness == "unavailable"
+      and (.reason | contains("timed out"))))
+      and (.omitted | any(.surface | contains("secondmate registry unavailable")))
+  ' >/dev/null || fail "wedged registry read was not bounded and disclosed: $json"
+  pass "scaled read bounds still release a wedged reader"
 }
 
 test_current_landed_baseline_is_repeatable_and_prior_report_independent() {
@@ -1001,8 +1106,14 @@ test_partial_github_failure_degrades() {
   pass "a partial GitHub failure degrades gracefully"
 }
 
+# What this pins is the fallback mechanism, not a stopwatch: with no coreutils
+# timeout on PATH the bound has to come from perl, and a stalled gh call still
+# has to be cut loose and disclosed. The gh stub sleeps and THEN answers with a
+# valid PR payload, so an unbounded call would report available PRs; "unavailable"
+# is only reachable by the bound firing. No elapsed-seconds assertion: on a slow
+# host the surrounding snapshot dwarfs the bound and the clock proves nothing.
 test_perl_fallback_bounds_github_call() {
-  local home fakebin toolbin cmd json started elapsed
+  local home fakebin toolbin cmd json mechanism
   home=$(make_home perl-timeout); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
@@ -1010,11 +1121,10 @@ test_perl_fallback_bounds_github_call() {
   for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
-  started=$(date +%s)
+  mechanism=$(PATH="$fakebin:$toolbin" bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = perl ] || fail "fixture PATH did not select the perl fallback: $mechanism"
   json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
   printf '%s' "$json" | jq -e '.prs | test("unavailable")' >/dev/null \
     || fail "timed-out gh call did not fail soft: $json"
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
@@ -1906,6 +2016,7 @@ test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
+test_scaled_read_bounds_still_release_a_wedged_reader
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
