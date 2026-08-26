@@ -160,9 +160,11 @@ fm_lock_windows_pid_liveness() {  # <pid>
 
 # fm_lock_windows_pids_with_cwd_under <dir>: print the MSYS pid of every OTHER
 # process whose current working directory is <dir> or under it, one per line.
-# Returns non-zero when the table itself could not be walked or a still-listed
-# process's cwd would not resolve: the answer is incomplete and callers must
-# read that as "cannot tell", never as "nothing found".
+# Returns non-zero when the table itself could not be walked, or when the cwd
+# of a still-listed process that kill -0 cannot prove dead would not resolve:
+# the answer is incomplete and callers must read that as "cannot tell", never
+# as "nothing found". A lingering entry for a provably dead pid is the exit
+# race explained inline below and is skipped, not a gap.
 #
 # `cd -P` is a bash builtin that resolves the procfs symlink with no fork;
 # `readlink` over the same table costs one fork per process, measured at ~5s for
