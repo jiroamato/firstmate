@@ -1,0 +1,5 @@
+# Failure path: PATH stripped so neither python3 nor python exists
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: no Python 3 interpreter on PATH; tried "python3" then "python".
+fm-doc-audience-check: install Python 3 and expose it under either name, then re-run.
+rc=1

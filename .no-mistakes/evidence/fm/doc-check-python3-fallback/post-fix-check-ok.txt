@@ -1,0 +1,4 @@
+# Post-fix check (target commit 8ff6cad) on the same host (no python3; python is 3.12.11 miniforge):
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=69 local_links=240
+rc=0

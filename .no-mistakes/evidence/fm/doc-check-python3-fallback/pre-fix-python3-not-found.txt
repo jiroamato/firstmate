@@ -1,0 +1,10 @@
+$ python3 --version
+/usr/bin/bash: line 27: python3: command not found
+rc=127
+$ python --version
+Python 3.12.11
+
+# Pre-fix check (base commit 321c58a) on this host:
+$ bin/fm-doc-audience-check.sh
+/tmp/tmp.W66eX4NY11/base/bin/fm-doc-audience-check.sh: line 14: exec: python3: not found
+rc=127
