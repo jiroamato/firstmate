@@ -634,17 +634,53 @@ SH
 #      ShellCheck 0.11.0 reports SC1017 on every line of them, so the gate
 #      failed on file endings rather than on the code.
 
-# The pinned command string, read from the tracked config no-mistakes reads.
-fm_lint_gate_command() {
-  sed -n "s/^[[:space:]]*lint:[[:space:]]*'\(.*\)'[[:space:]]*$/\1/p" \
-    "$ROOT/.no-mistakes.yaml"
+# The raw `lint:` entry, read from the tracked config no-mistakes reads.
+# Scoped to the top-level `commands:` block (the range ends at the next
+# non-indented line) so a `lint:` key anywhere else in the file cannot match,
+# and only the first hit is taken so a duplicate key cannot yield multiple
+# lines. Deliberately sed-only: this suite must run on a bare CI runner, so no
+# yq/python-style YAML parser is available to lean on.
+fm_lint_gate_line() {
+  sed -n '/^commands:[[:space:]]*\(#.*\)\{0,1\}$/,/^[^[:space:]]/{
+    s/^[[:space:]]\{1,\}lint:[[:space:]]*//p
+  }' "$ROOT/.no-mistakes.yaml" | head -n 1
+}
+
+# fm_lint_scalar_value <raw-value>: reduce a YAML scalar to its string value,
+# accepting the forms the consumer accepts for this key - plain, single-quoted,
+# and double-quoted flow scalars, each with an optional trailing comment.
+# Prints nothing for forms outside that set (e.g. block scalars), which the
+# caller reports as a parse failure rather than a missing key.
+fm_lint_scalar_value() {
+  local raw=$1 value
+  case "$raw" in
+    \'*)
+      value=${raw#\'}
+      case "$value" in *\'*) value=${value%%\'*} ;; *) value= ;; esac
+      ;;
+    \"*)
+      value=${raw#\"}
+      case "$value" in *\"*) value=${value%%\"*} ;; *) value= ;; esac
+      ;;
+    '#'* | '|'* | '>'*)
+      value=
+      ;;
+    *)
+      value=${raw%%[[:space:]]#*}
+      value=${value%"${value##*[![:space:]]}"}
+      ;;
+  esac
+  printf '%s\n' "$value"
 }
 
 test_gate_pins_the_owner_behind_an_interpreter() {
-  local command first
-  command=$(fm_lint_gate_command)
-  [ -n "$command" ] \
+  local line command first
+  line=$(fm_lint_gate_line)
+  [ -n "$line" ] \
     || fail ".no-mistakes.yaml sets no commands.lint; the gate would not run the lint owner"
+  command=$(fm_lint_scalar_value "$line")
+  [ -n "$command" ] \
+    || fail "commands.lint exists but is not a plain, single-quoted, or double-quoted scalar; got '$line'"
   case "$command" in
     *bin/fm-lint.sh*) : ;;
     *) fail "commands.lint must invoke bin/fm-lint.sh, the single lint owner; got '$command'" ;;
@@ -659,7 +695,7 @@ test_gate_pins_the_owner_behind_an_interpreter() {
 }
 
 test_shell_sources_are_pinned_to_lf() {
-  local file targets unpinned
+  local file targets attrs attr_count unpinned
   local -a files
   files=()
   targets=$(CI=true "$LINT" --list-files)
@@ -674,8 +710,19 @@ EOF
   # per-file `git check-attr` spawn is minutes of process overhead on Windows.
   # Only the pin is asserted here; whether a given checkout actually holds LF is
   # what ShellCheck itself reports, as SC1017, when fm-lint.sh runs.
-  unpinned=$(printf '%s\n' "${files[@]}" \
-    | git -C "$ROOT" check-attr eol --stdin | grep -v ': eol: lf$') || unpinned=
+  attrs=$(printf '%s\n' "${files[@]}" | git -C "$ROOT" check-attr eol --stdin) \
+    || fail "git check-attr failed; the LF pin could not be verified at all"
+  # Fail closed: one answer line per queried file, or the guard proves nothing.
+  attr_count=0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    attr_count=$((attr_count + 1))
+  done <<EOF
+$attrs
+EOF
+  [ "$attr_count" -eq "${#files[@]}" ] \
+    || fail "git check-attr answered for $attr_count of ${#files[@]} lint targets; the LF pin could not be verified"
+  unpinned=$(printf '%s\n' "$attrs" | grep -v ': eol: lf$') || unpinned=
   [ -z "$unpinned" ] \
     || fail ".gitattributes must pin every lint target to LF; unpinned: $(printf '%s' "$unpinned" | tr '\n' ' ')"
   pass "every lint target is pinned to LF, so no checkout can fail the gate on SC1017"
